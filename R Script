@@ -1,0 +1,1931 @@
+#Decrypting seasonal patterns of key pollen genera in Hobart, Australia: a multi-barcode metabarcoding approach
+#Data Analysis code
+#Lachlan Tegart (@treegart GitHub)
+#September 2022
+
+####Libraries ----
+library(vegan)# for ecology 
+library(ggplot2) # for plots
+library(dplyr) #for shaping objects
+library(tibble) #for shaping datafrmes
+library(lubridate) #for date transforming
+library(VennDiagram) #to help make the venn diagrams
+library(corrplot) #to make the corrplots
+library(ggpubr) #for combining ggplots together
+library(reshape2)
+library(ggpmisc) #to make the spearman correlation graphs with equations
+library(phyloseq)
+library(cowplot) #to put figures in a grid
+library(ggpmisc)
+library(reshape)
+
+setwd("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1")
+
+##trnL-trnF Data Entry----
+#Read in The ASV
+ASV <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/trnLtrnFASVComb1.csv")
+
+#Read in the Taxonomy. Classified by DADA2 from the CRAB database and add species (on 21Jul22)
+TAX <- readRDS("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/taxtab_withSpecies.rds")
+
+#select out the samples that I want, the dust and the aerial samples
+ASVda <- ASV %>% select(2:128,130)
+
+#rename the columns to be more sensible
+names(ASVda) <- gsub(x = names(ASVda), pattern = "_TRNtag", replacement = "")
+names(ASVda) <- gsub(x = names(ASVda), pattern = "X", replacement = "")
+
+#set the OTUID to the colnames
+ASVda <- ASVda %>% column_to_rownames("sequence")
+#transpose to fit Gabri's code
+ASVdat <- as.data.frame(t(ASVda))
+#####save sequences and change names to ASV1 ASV2 ASV3 etc
+ASVnames=sprintf("ASV%s",seq(1:ncol(ASVdat))) ##### create a vector with new names
+sequences = colnames(ASVdat) #### extract the sequences
+sequencesnames=t(rbind(ASVnames, sequences)) #### create a data.frame with all this
+write.csv(sequencesnames, "C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/sequencesnamestrn.csv") ### write a CSV file with all that inside
+colnames(ASVdat)= ASVnames #### substitute the names in the ASV table
+rownames(TAX) = ASVnames #### substitute the names in the ASV table
+rm(ASVnames,sequences,sequencesnames,ASV,ASVda) ### remove useless files (keep )
+
+#eliminate low number reads
+ASVdat <- as.data.frame(t(ASVdat))
+sort(colSums(ASVdat))
+#There are a few that are below 100
+hist(colSums(ASVdat), breaks = 100)
+#I will have to eliminate quite a few but not too many
+keep = names(which((colSums(ASVdat) > 100)))
+ASVdat = ASVdat[,colnames(ASVdat) %in% keep]
+
+###now remove rows with all zeroes (due to removing the low sample reads)
+dim(ASVdat) #358 65
+ASVdat = ASVdat[rowSums(ASVdat[, -1])>0, ]
+dim(ASVdat)
+#I went from 358 OTUs to 290 OTUs
+TAX = TAX[rownames(TAX) %in% rownames(ASVdat),]
+
+#METADATA, this is used for ITS2 and pollen count too
+metpm <- read.csv("hobart_met_pmv2.csv")
+
+#I like the column names. But I want to change the Day column to date
+names(metpm)[names(metpm) == "Day"] <- "date"
+
+#set dates as proper date format
+metpm$date <- as.POSIXct(metpm$date, tz = "Australia/Hobart")
+
+#This reads in the dates for each time period
+library(readxl)
+df_dt_window <- read_xlsx("PollenDNAMapping.xlsx")
+metpm$'Tube Code' <-""
+
+#This double loop searches the pollen count table for corresponding start and end dates from the "df_dt_window" table so we can summarise all the pollen values based on the same tube code/start date
+for (i in 1:dim(metpm)[1]){
+  for (j in 1:dim(df_dt_window)[1]){
+    
+    if(metpm$date[i] >= as.Date(df_dt_window$`Date to start PollenCount sum at`[j]) & metpm$date[i]<=as.POSIXct(df_dt_window$`Date to end PollenCount sum`[j]))
+    { metpm$`Tube Code`[i] <- df_dt_window$`Tube Code`[j]}
+  }
+}
+
+metpm_averaged <- metpm %>% dplyr::group_by(`Tube Code`) %>% summarise_all(mean)
+#remove 'date' column here because it is an uninformative value that is from an average
+metpm_averaged <- metpm_averaged %>% dplyr::select(!!-2)
+#remove the top row
+metpm_averaged = metpm_averaged[-1,]
+#I need to insert the correct start date columsn to this dataset
+#If I do it like this, the date can be here, and we can just use the "W.." code as the identifying code
+metpm_averaged$`Tube Code`
+
+weeklydates <- c("4/12/2018", "11/12/2018", "18/12/2018", "25/12/2018", "1/1/2019", "8/1/2019", "15/1/2019", "22/1/2019", "28/1/2019", "4/2/2019", "11/2/2019", 
+                 "18/2/2019", "25/2/2019", "4/3/2019", "11/3/2019", "18/3/2019", "25/3/2019", "1/4/2019", "8/4/2019", "15/4/2019", "22/4/2019", "29/4/2019", 
+                 "6/5/2019", "13/5/2019", "20/5/2019", "27/5/2019", "3/6/2019", "10/6/2019", "17/6/2019", "24/6/2019", "1/7/2019", "8/7/2019", "15/7/2019", 
+                 "22/7/2019", "29/7/2019", "5/8/2019", "12/8/2019", "19/8/2019", "26/8/2019", "2/9/2019", "9/9/2019", "16/9/2019", "23/9/2019", "2/10/2019", 
+                 "7/10/2019", "14/10/2019", "21/10/2019", "28/10/2019", "11/11/2019", "18/11/2019", "2/12/2019", "4/11/2019", "9/12/2019", "16/12/2019", 
+                 "30/12/2019", "6/1/2020", "13/1/2020", "20/1/2020", "27/1/2020", "3/2/2020", "10/2/2020", "17/2/2020", "24/2/2020", "2/3/2020", "9/3/2020", 
+                 "16/3/2020", "23/3/2020", "30/3/2020", "6/4/2020", "13/4/2020", "20/4/2020", "27/4/2020", "4/5/2020", "11/5/2020", "18/5/2020", "25/5/2020", 
+                 "1/6/2020", "8/6/2020", "16/6/2020", "22/6/2020", "29/6/2020", "6/7/2020", "13/7/2020", "20/7/2020", "27/7/2020", "3/8/2020", "10/8/2020", 
+                 "17/8/2020", "24/8/2020", "31/8/2020", "7/9/2020", "14/9/2020", "21/9/2020", "28/9/2020", "7/10/2020", "13/10/2020", "20/10/2020", "26/10/2020", 
+                 "3/11/2020", "9/11/2020")
+
+metpm_averaged$Start_Date <- as.POSIXct(weeklydates, tz = "Australia/Hobart", format="%d/%m/%Y")
+
+#Now I should add in year, month, month-year, and season
+metpm_averaged$year <- year(metpm_averaged$Start_Date)
+
+#add in a "month" column
+metpm_averaged$month <- month(metpm_averaged$Start_Date)
+
+#add a column that is month+year
+metpm_averaged$yearmonth <- paste(metpm_averaged$year, metpm_averaged$month)
+
+#now write in the season column
+metpm_averaged$season <- ifelse(metpm_averaged$month == 1 , "Summer",ifelse(metpm_averaged$month == 2 , "Summer",ifelse(metpm_averaged$month == 2 , "Summer", ifelse(metpm_averaged$month == 12 , "Summer",ifelse(metpm_averaged$month == 3 , "Autumn",ifelse(metpm_averaged$month == 4 , "Autumn", ifelse(metpm_averaged$month == 5 , "Autumn",ifelse(metpm_averaged$month == 6 , "Winter", ifelse(metpm_averaged$month == 7 , "Winter", ifelse(metpm_averaged$month == 8 , "Winter",ifelse(metpm_averaged$month == 9 , "Spring", ifelse(metpm_averaged$month == 10 , "Spring", "Spring")) ))) )) ) ))))
+
+#only retain the dates that are in the trnL-trnF ASV list
+aa <- t(ASVdat)
+metpm_averaged1 <- metpm_averaged %>% 'row.names<-'(., NULL) %>% column_to_rownames(var = "Tube Code")
+metpm_subset <- as.data.frame(metpm_averaged1[rownames(metpm_averaged1) %in% rownames(aa),])
+rownames(metpm_subset) <- rownames(metpm_averaged1)[rownames(metpm_averaged1) %in% rownames(aa)]
+
+samps <- metpm_subset
+write.csv(samps,"C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/METAaerialtrnL-trnF.csv")
+
+#clean workspace
+rm(i, j, keep, weeklydates, aa, df_dt_window, metpm, metpm_averaged1, metpm_subset)
+
+#put into trnL-trnF phyloseq
+ASVphylo <- as.matrix(ASVdat)
+TAXphylo <- as.matrix(TAX)
+# sampledata <- IDs %>% tibble::column_to_rownames("SampleName")
+
+#makes it easier to input the phyloseq object
+OTU = otu_table(ASVphylo, taxa_are_rows = TRUE)
+TAX = tax_table(TAX)
+samples = sample_data(samps)
+
+#make the phyloeq object
+TRphyloOG <- phyloseq(OTU, TAX, samples)
+#this is the object for all trnL-trnF with samples larger than 100 sequences
+#clean workspace
+rm(ASVdat, ASVphylo, samples, TAXphylo, OTU, TAX)
+
+#Edit trnL-trnF Taxonomy----
+ASVtotals <- as.data.frame(TRphyloOG@otu_table) %>% mutate(Total = rowSums(.)) %>% select(Total) %>% arrange(desc(Total))
+#Add in the taxonomy
+ASVtax <- as.data.frame(TRphyloOG@tax_table)
+ASVcombined <- merge(ASVtotals,ASVtax,by='row.names')  %>% arrange(desc(Total))
+names(ASVcombined)[names(ASVcombined) == 'Row.names'] <- 'ASV'
+sequencenames <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/sequencesnamestrn.csv") ### write a CSV file with all that inside
+sequencesnames <- as.data.frame(sequencenames)
+names(sequencesnames)[names(sequencesnames) == 'ASVnames'] <- 'ASV'
+ASVseqcombined <- left_join(ASVcombined,sequencesnames,by="ASV")
+write.csv(ASVseqcombined,"C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/trnLtrnFtaxasvtesting.csv")
+#I opened this doc in excel and edited the taxonomy with the most correct BLAST results
+#I will change the top 50, then all additional Poaceae, Myrtaceae and Cupressaceae
+#Some changes were more dramatic but some were very minimal
+#This is the table with the changes
+redonetax <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/trnLtrnFtaxasvCORRECTEDfin.csv")
+##Now if i remake the phyloseq objcet to be able to redo the taxonomy it should be good to reuse in these other situations
+
+taxredo1 <- redonetax %>% select(2,4:10) %>% column_to_rownames("ASV")
+
+#format the objects to make ASV and TAX matrix and the samples/metadata to have rownames
+ASVphyloR <- as.matrix(as.data.frame(TRphyloOG@otu_table))
+TAXphyloR <- as.matrix(taxredo1)
+
+#makes it easier to input the ohyloseq object
+OTUR = otu_table(ASVphyloR, taxa_are_rows = TRUE)
+TAXR = tax_table(TAXphyloR)
+samplesR = sample_data(samps)
+#make the phyloeq object
+TRphyloREDO <- phyloseq(OTUR, TAXR, samplesR)
+
+rm(ASVcombined, ASVphyloR, ASVseqcombined, ASVtax, ASVtotals, redonetax, samplesR, samps, sequencenames, sequencesnames, TAXphyloR, taxredo1, TRphyloOG, OTUR, TAXR)
+
+
+
+#Pollen Count Data Entry----
+pollen <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/hobart_pollen_wide.csv")
+
+#rename the columns
+columnames <- c("date", "Pap", "Pi", "Pl", "Ac", "Am", "Pop", "Ca", "Be", "TotCalc", "Pla", "Poa", "Pod", "As", "No", "Ol", "Tot", "Oth", "Ul", "Tri", "Sa", "Ru", "Co", "Cu", "Cy", "Dod", "Qu", "My", "Br", "Ar", "Alt", "Al", "Ur")
+newcols <- c("date", "Papaver", "Pinus", "Plantago", "Acacia", "Amaranthaceae", "Populus", "Allocasuarina", "Betula", "TotCalc", "Platanaceae", "Poaceae", "Podocarpaceae", "Asteraceae", "Nothofagus", "Oleaceae", "Total", "Other", "Ulmus", "Trifolium", "Salix", "Rumex", "Coprosma", "Cupressaceae", "Cyperaceae", "Dodonaea", "Quercus", "Myrtaceae", "Brassicaceae", "Arecaceae", "Alternaria", "Alnus", "Urticaceae")
+pollen1 <- pollen[, columnames]
+pollen2 <- data.table::setnames(pollen1, old=columnames, new=newcols)
+
+# sets dates as proper date format
+# pollen1$date <- as.POSIXct(pollen1$date)
+pollen2$date <- as.Date(pollen2$date)
+
+#change all NAs to zeros. This happens when taxa weren't counted earlier in the cycle like Urticaceae, if we are making graphs with these taxa we need to highlight this
+pollen2[is.na(pollen2)] <- 0
+
+#this makes the 
+df_dt_window <- read.csv("PollenDNAMapping.csv")
+#set the date structure 
+df_dt_window$Date.to.start.PollenCount.sum.at <- as.Date(df_dt_window$Date.to.start.PollenCount.sum.at)
+df_dt_window$Date.to.end.PollenCount.sum <- as.Date(df_dt_window$Date.to.end.PollenCount.sum)
+df_dt_window$Set.Date <- as.Date(df_dt_window$Set.Date)
+
+#PolDates1
+#filter for selected dates
+PolDates1 <- pollen2 
+PolDates1$date <- as.Date(PolDates1$date)
+PolDates1$Tube.Code <- ""
+
+#This double loop searches the pollen count table for corresponding start and end dates from the "df_dt_window" table so we can summarise all the pollen values based on the same tube code/start date
+for (i in 1:dim(PolDates1)[1]){
+  for (j in 1:dim(df_dt_window)[1]){
+    if(as.Date(PolDates1$date[i])>=df_dt_window$Date.to.start.PollenCount.sum.at[j] & PolDates1$date[i]<=df_dt_window$Date.to.end.PollenCount.sum[j])
+    { PolDates1$Tube.Code[i] <- df_dt_window$Tube.Code[j]}
+  }
+}
+
+#this summarises the pollen counts for each taxa based on the tube code
+#make sure you check that the values are logical including the short/long "weeks"
+#remove the first date column because 
+
+PolDates_timewindow <- PolDates1  %>% group_by(Tube.Code) %>% summarise_all(mean)
+PolDates_timewindow_ndays <- PolDates1 %>% group_by(Tube.Code) %>% summarise(n_days=n())
+PollenTable <- merge(PolDates_timewindow,PolDates_timewindow_ndays,by="Tube.Code")
+PollenTable <- left_join(PollenTable,df_dt_window, by="Tube.Code")
+
+#retain only the most relevant columns and na.omit removes the row that has no tube code
+PollenTable2 <- PollenTable %>% select(1,3:10,12:17,19:36) %>% na.omit()
+
+#Combine together the metadata from earlier to put with the PC table
+metpmpc <- metpm_averaged
+PollenTable10 <- PollenTable2
+names(metpmpc)[names(metpmpc) == 'Tube Code'] <- 'Tube.Code'
+
+#W72 is missing from metpm due to no measurement during that period
+#I will remove that column from the PollenTable2 dataset
+PollenTable10 <- PollenTable10[!(PollenTable10$Tube.Code=="W072"),]
+
+PCcombined <- left_join(PollenTable10, metpmpc, by="Tube.Code")
+
+write.csv(PCcombined, "C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/PCcombinedfinal.csv")
+
+#There is a weird discrepancy between date and time and I can't work out how ot parse the timezones
+#I have made sure they are congruous but if I select the Start_Date one it should be fine.
+PCASV <- PCcombined %>% select(1:28,30:31) %>% column_to_rownames("Tube.Code")
+PCMETA <- PCcombined %>% select(1,34:56) %>% column_to_rownames("Tube.Code")
+PCMETA$year <- as.character(PCMETA$year)
+PCMETA$month <- as.character(PCMETA$month)
+
+rm(df_dt_window,metpmpc,PolDates_timewindow,PolDates_timewindow_ndays,columnames,PolDates1,pollen,pollen1,pollen2,PollenTable,PollenTable10,PollenTable2,colunnames,i,j,newcols)
+
+#thus PCMETA and PCASV are our pollen count datasets
+
+###ITS2 Data Entry-----
+#Read in The ASV
+ASV <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/its2combinedasv.csv")
+
+#Read in the Taxonomy. Classified by DADA2
+TAX <- readRDS("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/its2_small.rds")
+
+#select out the samples that I want, the dust and the aerial samples
+ASVda <- ASV %>% select(2,106:172)
+
+#rename the columns to be more sensible
+names(ASVda) <- gsub(x = names(ASVda), pattern = "_ITStag", replacement = "")
+
+#set the OTUID to the colnames
+ASVda <- ASVda %>% column_to_rownames("X.OTU.ID")
+#transpose to fit Gabri's code
+ASVdat <- as.data.frame(t(ASVda))
+#####save sequences and change names to ASV1 ASV2 ASV3 etc
+ASVnames=sprintf("ASV%s",seq(1:ncol(ASVdat))) ##### create a vector with new names
+sequences = colnames(ASVdat) #### extract the sequences
+sequencesnames=t(rbind(ASVnames, sequences)) #### create a data.frame with all this
+write.csv(sequencesnames, "C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/sequencesnames.csv") ### write a CSV file with all that inside
+colnames(ASVdat)= ASVnames #### substitute the names in the ASV table
+rownames(TAX) = ASVnames #### substitute the names in the ASV table
+rm(ASVnames,sequences,sequencesnames,ASV,ASVda) ### remove useless files (keep )
+
+#eliminate low number reads
+ASVdat <- as.data.frame(t(ASVdat))
+sort(colSums(ASVdat))
+#There are a few that are below 1000
+hist(colSums(ASVdat), breaks = 100)
+#I will have to eliminate quite a few but not too many
+#we start with 67 samples
+#we are keeping samples that have less than 1000, keeping in mind that we are only keeping the ones that more than 100 plant seqs
+keep = names(which((colSums(ASVdat) > 100)))
+ASVdat = ASVdat[,colnames(ASVdat) %in% keep]
+##
+
+###now remove rows with all zeroes (due to removing the low sample reads)
+ASVdat = ASVdat[rowSums(ASVdat[, -1])>0, ]
+#I went from 4445 OTUs to 3276 OTUs
+TAX = TAX[rownames(TAX) %in% rownames(ASVdat),]
+
+###now add in the metadata from ITS
+aa <- t(ASVdat)
+metpm_averaged1 <- metpm_averaged %>% 'row.names<-'(., NULL) %>% column_to_rownames(var = "Tube Code")
+metpm_subset <- as.data.frame(metpm_averaged1[rownames(metpm_averaged1) %in% rownames(aa),])
+rownames(metpm_subset) <- rownames(metpm_averaged1)[rownames(metpm_averaged1) %in% rownames(aa)]
+
+samps <- metpm_subset
+write.csv(samps,"C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/METAaerialITS2")
+
+###Now I can put it into a phyloseq object
+#format the objects to make ASV and TAX matrix and the samples/metadata to have rownames
+ASVphylo <- as.matrix(ASVdat)
+TAXphylo <- as.matrix(TAX)
+# sampledata <- IDs %>% tibble::column_to_rownames("SampleName")
+
+#makes it easier to input the ohyloseq object
+OTU = otu_table(ASVphylo, taxa_are_rows = TRUE)
+TAX = tax_table(TAX)
+samples = sample_data(samps)
+
+#make the phyloeq object
+ITSphyloOG <- phyloseq(OTU, TAX, samples)
+##OG is now our raw phyloseq to subset everything
+
+rm(aa,ASVdat,ASVphylo,metpm_averaged,metpm_averaged1,metpm,averaged1,metpm_subset,samples,samps,keep,OTU,TAX)
+
+###Now make it a plant only datdabase
+ITSphyloPLANT <- subset_taxa(ITSphyloOG, Kingdom=="k__Viridiplantae")
+#filter for at least 100
+ITSphyloPLANTfilter <- prune_samples(sample_sums(ITSphyloPLANT) > 99, ITSphyloPLANT)
+
+#check how many ASVs are here
+dim(ITSphyloPLANTfilter@otu_table)
+#234x29
+#there are 234 ASVs
+
+rm(ITSphyloOG,ITSphyloPLANT,columnames,TAXphylo)
+###all the data is read in now
+
+
+###Venn Diagram-----
+#For Fig. 2 and Supplementary Table 4
+#make a vector for the families in each method
+#trnL-trnF
+trnTAXR <- as.data.frame(TRphyloREDO@tax_table)
+trnfamilies <- trnTAXR %>% select(Family) %>% na.omit() %>% unique()
+trnfamilies <- c(trnfamilies$Family)
+
+#Pollen Counts
+PCtaxa <- colnames(PCASV)
+#I export it to an excel so I can write out the families for eahc of the taxa that are present
+write.csv(PCtaxa, "C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/PCtaxa.csv")
+##I changed them all the families and removed other and then saved it as a new csv
+PCfamilies <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/PCfamilies.csv",header=FALSE)
+PCfamilies <- c(unique(PCfamilies$V1))
+
+###If I can export the ITS stuff pre-phyloseq then I can bring it together here and make it work
+ITSfamilies1 <- as.data.frame(ITSphyloPLANTfilter@tax_table) %>% select(Family) %>% na.omit() %>% unique() 
+ITSfamilies <- gsub(x = ITSfamilies1$Family, pattern = "f__", replacement = "")
+
+#now work out what's in common
+i <- ITSfamilies
+t <- trnfamilies
+p <- PCfamilies
+
+#create a list
+vlist = list(i,t,p)
+
+#calculate overlap of this list
+overlap <- calculate.overlap(vlist)
+overlap
+#I used this list to make Fig. 2 and Supplementary Table 4
+
+#make this for the next step
+it <- intersect(i,t)
+ip <- intersect(i,p)
+pt <- intersect(p,t)
+
+itp <- intersect(ip,pt)
+
+# rm(overlap,vlist,i,ITSfamilies,p,PCfamilies,t,trnfamilies,trnTAXR,ITSfamilies1,it,ip,pt)
+
+###Venn Diagrams and Spearman Correlation----
+#For Fig.2
+
+#get together based on families
+PCfamiliestaxa <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/PCFAMtaxa.csv",header=TRUE)
+PCtaxafam <- as.data.frame(t(PCASV)) %>% rownames_to_column("Taxa")
+PCfamtaxcom <- left_join(PCfamiliestaxa,PCtaxafam,by="Taxa")%>% select(-"Taxa") %>% dplyr::group_by(Family) %>% summarise_all(sum)
+PCfamilytot <- as.data.frame(cbind(PCfamtaxcom$Family,rowSums(PCfamtaxcom[,-1])))
+names(PCfamilytot)[names(PCfamilytot) == 'V1'] <- 'Family'
+
+#now try trnL-trnF
+trnfam = tax_glom(TRphyloREDO, taxrank = "Family")
+trnTAXfam <- as.data.frame(trnfam@tax_table) %>% select("Family") %>% rownames_to_column("asv")
+trnASVfam <- as.data.frame(trnfam@otu_table) %>% rownames_to_column("asv")
+trnfam <- left_join(trnTAXfam,trnASVfam,by="asv") %>% select(-"asv")
+trnfamilytot <- as.data.frame(cbind(trnfam$Family,rowSums(trnfam[,-1])))
+names(trnfamilytot)[names(trnfamilytot) == 'V1'] <- 'Family'
+
+#ITS
+ITSplantASV <- as.data.frame(ITSphyloPLANTfilter@otu_table) %>% rownames_to_column("X")
+ITSplantTAXfam <- as.data.frame(ITSphyloPLANTfilter@tax_table) %>% rownames_to_column("X") %>% select("X","Family")
+ITSfamcomb <- left_join(ITSplantTAXfam,ITSplantASV,by="X") %>% select(-"X") %>% dplyr::group_by(Family) %>% summarise_all(sum)
+ITSfamcomb$Family <- gsub(x = ITSfamcomb$Family, pattern = "f__", replacement = "")
+ITSfamilytot <- as.data.frame(cbind(ITSfamcomb$Family,rowSums(ITSfamcomb[,-1]))) 
+names(ITSfamilytot)[names(ITSfamilytot) == 'V1'] <- 'Family'
+
+#use these to make the Venn Diagrams
+PCfamilytot0 <- PCfamilytot %>% filter(!Family == "none")
+#eliminate the families with zeros
+trnfamilytot0 <- trnfamilytot %>% filter(!V2 == 0) %>% na.omit()
+ITSfamilytot0 <- ITSfamilytot %>% filter(!V2 == 0) %>% na.omit()
+
+#create a list
+vlist = list(ITSfamilytot0$Family,trnfamilytot0$Family,PCfamilytot0$Family)
+
+overlap <- calculate.overlap(vlist)
+overlap
+
+#use this to make the venn diagram
+
+#Try it again by showing the families that in common with each pairwise method rather than the whole lot of them
+ITfam <- c(overlap$a5, overlap$a2)
+IPfam <- c(overlap$a5, overlap$a4)
+TPfam <- c(overlap$a5, overlap$a6)
+iONLY <- c(overlap$a1)
+tONLY <- c(overlap$a3)
+pONLY <- c(overlap$a7)
+
+# #make the ITS list in ref to trnL
+ITSrefT <- ITSfamilytot0 %>% filter(Family %in% ITfam)
+TRNrefI <- trnfamilytot0 %>% filter(Family %in% ITfam)
+#make ITS trnL-F df
+ITfamlist <- left_join(ITSrefT,TRNrefI,by="Family") #%>% column_to_rownames("Family")
+names(ITfamlist)[names(ITfamlist) == 'V2.x'] <- 'ITS2'
+names(ITfamlist)[names(ITfamlist) == 'V2.y'] <- 'trnLF'
+ITfamlist$ITS2 <- as.numeric(ITfamlist$ITS2)
+ITfamlist$trnLF <- as.numeric(ITfamlist$trnLF)
+
+#try to make the graph now
+ITfamlist <- ITfamlist %>% arrange(desc(ITS2)) %>% mutate(ITSrank = 1:nrow(ITfamlist))
+ITfamlist <- ITfamlist %>% arrange(desc(trnLF)) %>% mutate(trnLrank = 1:nrow(ITfamlist))
+
+plot(ITfamlist$ITSrank,ITfamlist$trnLrank)
+ITSvTRNscatter <- ggplot(ITfamlist, aes(x=ITSrank, y=trnLrank)) + geom_point(colour="red", size=3) + 
+    geom_text(label=ITfamlist$Family, position=position_jitter(width=0.5,height=0.5), size=7) + geom_smooth(method=lm, se=FALSE, colour="red") + 
+    stat_poly_eq(formula = y ~ x, aes(label = paste(..p.value.label.., ..rr.label.., sep = "*`,`~")),size=7 ) +
+    labs(y="trnL-trnF rank", x="ITS2 rank")
+ITSvTRNscatter 
+#note that the R2 and stuff here are not correct, I need to calculate that separarely
+#change R2 in inkscape to rho
+
+cor.test(ITfamlist$ITS2,ITfamlist$trnLF,method="spearman")
+#add this to the inkscape 
+#rho = 0.477, p=0.040
+
+#make trnL-trnF PC df
+TRNrefP <- trnfamilytot0 %>% filter(Family %in% TPfam)
+PCrefT <- PCfamilytot0 %>% filter(Family %in% TPfam)
+#make the trnF PC df
+TPfamlist <- left_join(TRNrefP,PCrefT,by="Family") #%>% column_to_rownames("Family")
+names(TPfamlist)[names(TPfamlist) == 'V2.x'] <- 'trnLF'
+names(TPfamlist)[names(TPfamlist) == 'V2.y'] <- 'PC'
+TPfamlist$trnLF <- as.numeric(TPfamlist$trnLF)
+TPfamlist$PC <- as.numeric(TPfamlist$PC)
+
+TPfamlist <- TPfamlist %>% arrange(desc(trnLF)) %>% mutate(trnLrank = 1:nrow(TPfamlist))
+TPfamlist <- TPfamlist %>% arrange(desc(PC)) %>% mutate(PCrank = 1:nrow(TPfamlist))
+
+trnLvPCscatter <- ggplot(TPfamlist, aes(x=PCrank, y=trnLrank)) + geom_point(colour="red", size=3) + 
+  geom_text(label=TPfamlist$Family, position=position_jitter(width=0.5,height=0.5), size=7) + geom_smooth(method=lm, se=FALSE, colour="red") + 
+  stat_poly_eq(formula = y ~ x, aes(label = paste(..p.value.label.., ..rr.label.., sep = "*`,`~")),size=7 ) +
+  labs(y="trnL-trnF rank", x="Pollen Count rank")
+trnLvPCscatter 
+#note that the R2 and stuff here are not correct, I need to calculate that separarely and then
+
+cor.test(TPfamlist$PC,TPfamlist$trnLF,method="spearman")
+#add this to the inkscape 
+#rho = 0.661, p=0.0008
+#change R2 in inkscape to rho
+
+#make the ITS list in ref to PC
+ITSrefP <- ITSfamilytot0 %>% filter(Family %in% IPfam)
+PCrefI <- PCfamilytot0 %>% filter(Family %in% IPfam)
+#make the ITS PC df
+IPfamlist <- left_join(ITSrefP,PCrefI,by="Family") #%>% column_to_rownames("Family")
+names(IPfamlist)[names(IPfamlist) == 'V2.x'] <- 'ITS2'
+names(IPfamlist)[names(IPfamlist) == 'V2.y'] <- 'PC'
+IPfamlist$ITS2 <- as.numeric(IPfamlist$ITS2)
+IPfamlist$PC <- as.numeric(IPfamlist$PC)
+
+IPfamlist <- IPfamlist %>% arrange(desc(ITS2)) %>% mutate(ITS2rank = 1:nrow(IPfamlist))
+IPfamlist <- IPfamlist %>% arrange(desc(PC)) %>% mutate(PCrank = 1:nrow(IPfamlist))
+
+ITS2vPCscatter <- ggplot(IPfamlist, aes(x=PCrank, y=ITS2rank)) + geom_point(colour="red", size=3) + 
+  geom_text(label=IPfamlist$Family, position=position_jitter(width=0.5,height=0.5), size=7) + geom_smooth(method=lm, se=FALSE, colour="red") +
+  stat_poly_eq(formula = y ~ x, aes(label = paste(..p.value.label.., ..rr.label.., sep = "*`,`~")), size=7 ) +
+  labs(y="ITS2 rank", x="Pollen Count rank")
+ITS2vPCscatter 
+#note that the R2 and stuff here are not correct, I need to calculate that separarely and then
+
+cor.test(IPfamlist$PC,IPfamlist$ITS2,method="spearman")
+#add this to the inkscape 
+#rho = 0.617, p=0.02
+#change R2 in inkscape to rho
+
+#maybe I should try to do it again by excluding only the unique values to make sure the values carry over
+# PCEXC <- PCfamilytot0 %>% filter(!Family %in% pONLY)
+# TRNEXC <- trnfamilytot0 %>% filter(!Family %in% tONLY)
+# ITEXC <- ITSfamilytot0 %>% filter(!Family %in% iONLY)
+# 
+# excludeTP <- full_join(PCEXC,TRNEXC,by="Family")
+# excludeITP <- full_join(excludeTP,ITEXC,by="Family")
+# names(excludeITP)[names(excludeITP) == 'V2.x'] <- 'PC'
+# names(excludeITP)[names(excludeITP) == 'V2.y'] <- 'trnLF'
+# names(excludeITP)[names(excludeITP) == 'V2'] <- 'ITS2'
+# excludeITP <- excludeITP %>% column_to_rownames("Family")
+# excludeITP$ITS2 <- as.numeric(excludeITP$ITS2)
+# excludeITP$PC <- as.numeric(excludeITP$PC)
+# excludeITP$trnLF <- as.numeric(excludeITP$trnLF)
+# 
+# library(GGally)
+# library(ggplot2)
+# 
+# ggpairs(excludeITP)
+# 
+# library(Spearman.plot)
+# 
+# Spearman = cor((IPfamlist %>% column_to_rownames("Family")),method="spearman")
+# testRes = cor.mtest(thirteenitp2, conf.level = 0.95)
+# methodcomparecorr <- corrplot(Spearman, p.mat=testRes$p, method="shade", col = COL1('Greys'), diag = FALSE, type='lower', insig='label_sig', pch.col = 'red', tl.cex=1.5, cl.cex = 1.5 )
+
+
+###join them together based on the families in common
+# thirteen <- as.data.frame(itp)
+# names(thirteen)[names(thirteen) == 'itp'] <- 'Family'
+# thirteeni <- left_join(thirteen,ITSfamilytot,by="Family")
+# names(thirteeni)[names(thirteeni) == 'V2'] <- 'ITS2'
+# thirteenit <- left_join(thirteeni,trnfamilytot,by="Family")
+# names(thirteenit)[names(thirteenit) == 'V2'] <- 'trnL-trnF'
+# thirteenitp <- left_join(thirteenit,PCfamilytot,by="Family")
+# names(thirteenitp)[names(thirteenitp) == 'V2'] <- 'Pollen Counts'
+# thirteenitp <- thirteenitp %>%column_to_rownames("Family")
+# thirteenitp2 <- mutate_all(thirteenitp, function(x) as.numeric(as.character(x)))
+# 
+# #make a corrplot
+# Spearman = cor(thirteenitp2,method="spearman")
+# testRes = cor.mtest(thirteenitp2, conf.level = 0.95)
+# methodcomparecorr <- corrplot(Spearman, p.mat=testRes$p, method="shade", col = COL1('Greys'), diag = FALSE, type='lower', insig='label_sig', pch.col = 'red', tl.cex=1.5, cl.cex = 1.5 )
+
+#I changed some of the text colour and sizes in inkscape
+
+
+
+
+
+
+
+rm(ITSfamcomb,ITSfamilytot,ITSplantASV,ITSplantTAXfam,methodcomparecorr,PCfamiliestaxa,PCfamilytot,PCfamtaxcom,PCtaxafam,Spearman,TAXphylo,testRes,thirteen,thirteen,thirteeni,thirteenit,thirteenitp,thirteenitp2,trnASVfam,trnfam,trnfamilytot,trnTAXfam,itp,PCtaxa)
+
+###Total Composition Graphs----
+#try to work out how to get the clours consistent by colour
+
+#start with trnL-trnF
+#To Family
+trnphyloFAM = tax_glom(TRphyloREDO, taxrank = "Family")
+trnphyloFAMt  = transform_sample_counts(trnphyloFAM, function(x) x / sum(x))
+trnASVFAM <- as.data.frame(trnphyloFAMt@otu_table)
+trnpfamsam <- as.data.frame(as.matrix(trnphyloFAMt@sam_data)) %>% rownames_to_column("variable")
+trnpfamtax <- as.data.frame(trnphyloFAMt@tax_table)
+rownames(trnASVFAM) = trnpfamtax[,5]
+trnFamilyASVlong  <- trnASVFAM %>% rownames_to_column("Family") %>% reshape::melt()
+trnFamilyASVlongsam <- left_join(trnFamilyASVlong,trnpfamsam,by="variable")
+
+tten <- aggregate(value~Family, data=trnFamilyASVlongsam, FUN=sum)
+tten <- tten[order(tten$value, decreasing=TRUE),]
+tten<-as.vector(tten$Family[1:10])
+
+trnFamilyASVlongsam10 <- trnFamilyASVlongsam
+`%nin%` = Negate(`%in%`) # create a negation, for not included (there is not in R)
+for ( i  in 1:length(trnFamilyASVlongsam10$Family)) #substitute those not in the top 10
+  if(trnFamilyASVlongsam10$Family[i] %nin% tten) trnFamilyASVlongsam10$Family[i]<-"others"
+
+
+trnFAMbarplot <- ggplot(trnFamilyASVlongsam10, aes(x=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')), y=value, fill=Family)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ggtitle("trnL-trnF Family") +
+  scale_fill_manual(values=c("Pinaceae"="darkolivegreen","Myrtaceae"="lightpink","Sapindaceae"="darkorange","Oleaceae"="lightskyblue","Poaceae"="dodgerblue4","Cupressaceae"="mediumpurple4","Asteraceae"="palegreen3","Dicksoniaceae"="turquoise4","Casuarinaceae"="firebrick","Betulaceae"="gold","others"="ivory4"))
+trnFAMbarplot
+  
+#estmiate the sample sizes for each season in this batch
+#remove all that is not needed
+trnfamN <- trnFamilyASVlongsam10 %>% select("Family", "variable", "value", "season") %>% filter(value > 0)
+#make a vector of the seasons
+seasonsv <- c(unique(trnfamN$season))
+#make a loop to work out how many samples are in each season
+a = vector()
+b = vector()
+for (i in 1:length(seasonsv))
+{
+  ys <- seasonsv[i]
+  trnfamN2 <- trnfamN %>% filter(season == ys) %>% select(variable) %>% unique %>% nrow()
+  print(trnfamN2)
+  a = rbind(ys,a)
+  b = rbind(trnfamN2,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'season'
+names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+# season  n
+# ys   Summer  1
+# ys.1 Spring 12
+# ys.2 Winter  9
+# ys.3 Autumn 11
+
+#now try with trnL-trnF genus
+trnphyloGEN = tax_glom(TRphyloREDO, taxrank = "Genus")
+trnphyloGENt  = transform_sample_counts(trnphyloGEN, function(x) x / sum(x))
+trnASVGEN <- as.data.frame(trnphyloGENt@otu_table)
+trngensam <- as.data.frame(as.matrix(trnphyloGENt@sam_data)) %>% rownames_to_column("variable")
+trngentax <- as.data.frame(trnphyloGENt@tax_table)
+trngentax$Genus <- gsub(x = trngentax$Genus, pattern = "g__", replacement = "")
+rownames(trnASVGEN) = trngentax[,6]
+trnASVGENlong  <- trnASVGEN %>% rownames_to_column("Genus") %>% melt()
+trnASVGENlongsam <- left_join(trnASVGENlong,trngensam,by="variable")
+
+tteng <- aggregate(value~Genus, data=trnASVGENlongsam, FUN=sum)
+tteng <- tteng[order(tteng$value, decreasing=TRUE),]
+tteng<-as.vector(tteng$Genus[1:10])
+
+trnASVGENlongsam10 <- trnASVGENlongsam
+for ( i  in 1:length(trnASVGENlongsam10$Genus)) #substitute those not in the top 10
+  if(trnASVGENlongsam10$Genus[i] %nin% tteng) trnASVGENlongsam10$Genus[i]<-"others"
+
+trnGENbarplot <- ggplot(trnASVGENlongsam10, aes(x=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')), y=value, fill=Genus)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ylab("Relative Abundance") + ggtitle("trnL-trnF Genus") +
+  scale_fill_manual(values=c("Pinus"="darkolivegreen","Eucalyptus"="lightpink","Dodonaea"="darkorange","Fraxinus"="lightskyblue","Dicksonia"="turquoise4","Allocasuarina"="firebrick","Cedrus"="darkolivegreen2","Hesperocyparis"="mediumpurple3","Ehrharta"="dodgerblue4","Cupressus"="mediumpurple4","others"="ivory4"))
+
+trnGENbarplot
+
+#the number of samples is the same here that are here for N
+# trngenN <- trnASVGENlongsam10 %>% select("Genus", "variable", "value", "season") %>% filter(value > 0)
+# #make a vector of the seasons
+# seasonsv <- c(unique(trngenN$season))
+# #make a loop to work out how many samples are in each season
+# a = vector()
+# b = vector()
+# for (i in 1:length(seasonsv))
+# {
+#   ys <- seasonsv[i]
+#   trngenN2 <- trngenN %>% filter(season == ys) %>% select(variable) %>% unique %>% nrow()
+#   print(trngenN2)
+#   a = rbind(ys,a)
+#   b = rbind(trngenN2,b)
+# }
+# nrowdf = cbind(a,b)
+# nrowdf1 <- as.data.frame(nrowdf)
+# names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'season'
+# names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+# 
+# trnfamN2 <- trnfamN %>% filter(season == "Winter") %>% select(variable) %>% unique %>% nrow() 
+
+
+##Now try it with ITS
+ITSphyloFAM = tax_glom(ITSphyloPLANTfilter, taxrank = "Family")
+ITSphyloFAMt  = transform_sample_counts(ITSphyloFAM, function(x) x / sum(x))
+ITSASVFAM <- as.data.frame(ITSphyloFAMt@otu_table)
+ITSpfamsam <- as.data.frame(as.matrix(ITSphyloFAMt@sam_data)) %>% rownames_to_column("variable")
+ITSpfamtax <- as.data.frame(ITSphyloFAMt@tax_table)
+ITSpfamtax$Family <- gsub(x = ITSpfamtax$Family, pattern = "f__", replacement = "")
+rownames(ITSASVFAM) = ITSpfamtax[,5]
+ITSFamilyASVlong  <- ITSASVFAM %>% rownames_to_column("Family") %>% melt()
+ITSFamilyASVlongsam <- left_join(ITSFamilyASVlong,ITSpfamsam,by="variable")
+
+iten <- aggregate(value~Family, data=ITSFamilyASVlongsam, FUN=sum)
+iten <- iten[order(iten$value, decreasing=TRUE),]
+iten<-as.vector(iten$Family[1:10])
+
+ITSFamilyASVlongsam10 <- ITSFamilyASVlongsam
+for ( i  in 1:length(ITSFamilyASVlongsam10$Family)) #substitute those not in the top 10
+  if(ITSFamilyASVlongsam10$Family[i] %nin% iten) ITSFamilyASVlongsam10$Family[i]<-"others"
+
+ilevels <- c(iten,"others")
+trnFamilyASVlongsam10$Family = factor(trnFamilyASVlongsam10$Family, levels=c(ilevels))
+                                
+ITSFAMbarplot <- ggplot(ITSFamilyASVlongsam10, aes(x=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')), y=value, fill=Family)) +  
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ylab("Relative Abundance") + geom_bar(position='fill', stat='identity') + ggtitle("ITS2 Family") +
+  scale_fill_manual(values=c("Cupressaceae"="mediumpurple4","Fabaceae"="mediumorchid","Pinaceae"="darkolivegreen","Betulaceae"="gold","Sapindaceae"="darkorange","Brassicaceae"="violetred4","Nothofagaceae"="blue","Rhamnaceae"="sienna2","Plantaginaceae"="firebrick","Urticaceae"="turquoise","others"="ivory4"))
+  #scale_fill_brewer(palette="Paired")
+ITSFAMbarplot
+
+itsgenN <- ITSFamilyASVlongsam10 %>% select("Family", "variable", "value", "season") %>% filter(value > 0)
+#make a vector of the seasons
+seasonsv <- c(unique(itsgenN$season))
+#make a loop to work out how many samples are in each season
+a = vector()
+b = vector()
+for (i in 1:length(seasonsv))
+{
+  ys <- seasonsv[i]
+  itsgenN2 <- itsgenN %>% filter(season == ys) %>% select(variable) %>% unique %>% nrow()
+  print(itsgenN2)
+  a = rbind(ys,a)
+  b = rbind(itsgenN2,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'season'
+names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+
+# season  n
+# ys   Spring 12
+# ys.1 Winter 11
+# ys.2 Autumn  2
+# ys.3 Summer  4
+
+
+#ITS with genus
+ITSphyloGEN = tax_glom(ITSphyloPLANTfilter, taxrank = "Genus")
+ITSphyloGENt  = transform_sample_counts(ITSphyloGEN, function(x) x / sum(x))
+ITSASVGEN <- as.data.frame(ITSphyloGENt@otu_table)
+ITSgensam <- as.data.frame(as.matrix(ITSphyloGENt@sam_data)) %>% rownames_to_column("variable")
+ITSgentax <- as.data.frame(ITSphyloGENt@tax_table)
+ITSgentax$Genus <- gsub(x = ITSgentax$Genus, pattern = "g__", replacement = "")
+rownames(ITSASVGEN) = ITSgentax[,6]
+ITSASVGENlong  <- ITSASVGEN %>% rownames_to_column("Genus") %>% melt()
+ITSASVGENlongsam <- left_join(ITSASVGENlong,ITSgensam,by="variable")
+
+iteng <- aggregate(value~Genus, data=ITSASVGENlongsam, FUN=sum)
+iteng <- iteng[order(iteng$value, decreasing=TRUE),]
+iteng<-as.vector(iteng$Genus[1:10])
+
+ITSASVGENlongsam10 <- ITSASVGENlongsam
+for ( i  in 1:length(ITSASVGENlongsam10$Genus)) #substitute those not in the top 10
+  if(ITSASVGENlongsam10$Genus[i] %nin% iteng) ITSASVGENlongsam10$Genus[i]<-"others"
+
+ITSGENbarplot <- ggplot(ITSASVGENlongsam10, aes(x=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')), y=value, fill=Genus)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ylab("Relative Abundance") + ggtitle("ITS2 Genus") +
+  scale_fill_manual(values=c("Callitropsis"="mediumpurple3","Juniperus"="mediumpurple1","Cupressus"="mediumpurple4","Pinus"="darkolivegreen","Juniperus"="mediumpurple1","Betula"="gold","Medicago"="mediumorchid4","Dodonaea"="darkorange","Pisum"="mediumorchid1","Genista"="mediumorchid3","Lophozonia"="blue","others"="ivory4"))
+
+ITSGENbarplot
+
+
+
+#make the pollen count one now
+pcfamgen <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/PCtaxafam.csv",header=TRUE)
+
+#move the columns around
+PCASV1 <- as.data.frame(as.matrix(t(PCASV))) %>% rownames_to_column("ptaxa")
+pcfamgenasv <- left_join(PCASV1,pcfamgen,by="ptaxa")
+#I have to combine together the entries in the same family
+pcfamgenasv1 <- pcfamgenasv %>% select(-"ptaxa",-"Genus") %>% melt()
+
+PCMETA1 <- PCMETA %>% rownames_to_column("variable")
+pcfamgenasvsam <- left_join(pcfamgenasv1,PCMETA1,by="variable")
+
+#choose the top10
+pten <- aggregate(value~Family, data=pcfamgenasvsam, FUN=sum) %>% filter(!Family == "Other")
+pten <- pten[order(pten$value, decreasing=TRUE),]
+pten<-as.vector(pten$Family[1:10])
+
+pcfamgenasvsam10 <- pcfamgenasvsam
+for ( i  in 1:length(pcfamgenasvsam10$Family)) #substitute those not in the top 10
+  if(pcfamgenasvsam10$Family[i] %nin% pten) pcfamgenasvsam10$Family[i]<-"others"
+
+PCFAMbarplot <- ggplot(pcfamgenasvsam10, aes(x=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')), y=value, fill=Family)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank()) + ylab("Relative Abundance") + ggtitle("Pollen Count Family") +
+  scale_fill_manual(values=c("Cupressaceae"="mediumpurple4","Betulaceae"="gold","Myrtaceae"="lightpink","Sapindaceae"="darkorange","Casuarinaceae"="firebrick","Poaceae"="dodgerblue4","Salicaceae"="palegreen3","Oleaceae"="lightskyblue","Pinaceae"="darkolivegreen","Polygonaceae"="khaki","others"="ivory4"))
+PCFAMbarplot
+
+PCgenN <- pcfamgenasvsam10 %>% select("Family", "variable", "value", "season") %>% filter(value > 0)
+#make a vector of the seasons
+seasonsv <- c(unique(PCgenN$season))
+#make a loop to work out how many samples are in each season
+a = vector()
+b = vector()
+for (i in 1:length(seasonsv))
+{
+  ys <- seasonsv[i]
+  PCgenN2 <- PCgenN %>% filter(season == ys) %>% select(variable) %>% unique %>% nrow()
+  print(PCgenN2)
+  a = rbind(ys,a)
+  b = rbind(PCgenN2,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'season'
+names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+
+# season  n
+# ys   Spring 22
+# ys.1 Winter 27
+# ys.2 Autumn 26
+# ys.3 Summer 25
+
+
+
+
+#now do it for genus
+pcgenasv1 <- pcfamgenasv %>% select(-"ptaxa",-"Family") %>% melt()
+pcgenasvsam <- left_join(pcgenasv1,PCMETA1,by="variable")
+
+pteng <- aggregate(value~Genus, data=pcgenasvsam, FUN=sum) %>% filter(!Genus == "Other")
+pteng <- pteng[order(pteng$value, decreasing=TRUE),]
+pteng<-as.vector(pteng$Genus[1:10])
+
+pcgenasvsam10 <- pcgenasvsam
+for ( i  in 1:length(pcgenasvsam10$Genus)) #substitute those not in the top 10
+  if(pcgenasvsam10$Genus[i] %nin% pteng) pcgenasvsam10$Genus[i]<-"others"
+
+
+PCGenbarplot <- ggplot(pcgenasvsam10, aes(x=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')), y=value, fill=Genus)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank()) + ylab("Relative Abundance") + ggtitle("Pollen Count Genus") +
+  scale_fill_manual(values=c("Cupressaceae*"="mediumpurple4","Myrtaceae*"="lightpink","Dodonaea"="darkorange","Betula"="gold","Allocasuarina"="firebrick","Poaceae*"="dodgerblue4","Oleaceae*"="lightskyblue","Pinus"="darkolivegreen","Salix"="palegreen3","Rumex"="khaki","others"="ivory4"))
+
+PCGenbarplot
+
+
+
+
+
+
+#put them all in the same graph
+# PCGenbarplot
+# PCFAMbarplot
+# ITSGENbarplot
+# ITSFAMbarplot
+# trnGENbarplot
+# trnFAMbarplot
+
+# allcomp <- grid.arrange(PCFAMbarplot,ITSFAMbarplot,trnFAMbarplot,PCGenbarplot,ITSGENbarplot,trnGENbarplot,
+                        ncol=3, nrow=2, align = "v")
+allcomp2 <- plot_grid(PCFAMbarplot,ITSFAMbarplot,trnFAMbarplot,PCGenbarplot,ITSGENbarplot,trnGENbarplot,
+                      ncol=3, nrow=2, align = "v")
+allcomp2
+
+
+#try combine the two datasets to see if it makes them look nice
+# ITSfam10 <- ITSFamilyASVlongsam10 %>% select("Family", "value", "season") %>% mutate(barcode="ITS2")
+# trnfam10 <- trnFamilyASVlongsam10 %>% select("Family", "value", "season")%>% mutate(barcode="trnL-trnF")
+# 
+# combfam10 <- rbind(ITSfam10,trnfam10)
+# 
+# combFAMbarplot <- ggplot(combfam10, aes(x=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')), y=value, fill=Family)) + geom_bar(position='fill', stat='identity') + 
+#   xlab("Season") + ylab("Relative Abundance") + facet_wrap(~barcode, scales = "free")
+# combFAMbarplot
+
+###Year Season Composition Graphs-----
+#make sure the season month thing is correct here too
+
+#add in the yearseason column
+trnFamilyASVlongsam10ys <- trnFamilyASVlongsam10
+trnFamilyASVlongsam10ys$yearseason <- ifelse("2018-12-01" < trnFamilyASVlongsam10ys$Start_Date & trnFamilyASVlongsam10ys$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < trnFamilyASVlongsam10ys$Start_Date & trnFamilyASVlongsam10ys$Start_Date < "2020-02-28", "2019-20 Summer", paste(trnFamilyASVlongsam10ys$year,trnFamilyASVlongsam10ys$season,sep=" ")))
+
+#trnL-trnF is missing 2018-19 Summer, I need to add in a blank value
+#I do this by adding in a blank subset of the other data
+dfsubset <- trnFamilyASVlongsam10ys %>% filter(yearseason == "2019-20 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2019-20 Summer", replacement = "2018-19 Summer")
+#replace all the numbers in each column with 0 to make sure it subsets properly
+dfsubset$value[dfsubset$value<20] <- 0
+trnFamilyASVlongsam10yssubset <- rbind(trnFamilyASVlongsam10ys,dfsubset)
+
+yearmonthCOMPL <-  c("2018-19 Summer",   "2019 Autumn", "2019 Winter",  "2019 Spring", "2019-20 Summer", "2020 Autumn", "2020 Winter", "2020 Spring")  
+
+#set the order back for the title
+trnFamilyASVlongsam10yssubset$yearseason = factor(trnFamilyASVlongsam10yssubset$yearseason , levels=yearmonthCOMPL) 
+
+trnFAMbarplotys <- ggplot(trnFamilyASVlongsam10yssubset, aes(x=yearseason, y=value, fill=Family)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ggtitle("trnL-trnF Family") +
+  scale_fill_manual(values=c("Pinaceae"="darkolivegreen","Myrtaceae"="lightpink","Sapindaceae"="darkorange","Oleaceae"="lightskyblue","Poaceae"="dodgerblue4","Cupressaceae"="mediumpurple4","Asteraceae"="palegreen3","Dicksoniaceae"="turquoise4","Casuarinaceae"="firebrick","Betulaceae"="gold","others"="ivory4"))
+trnFAMbarplotys
+
+
+#calculate the N for each sample
+
+TRNfamysN <- trnFamilyASVlongsam10yssubset %>% select("Family", "variable", "value", "yearseason") %>% filter(value > 0)
+#set yearseason to characters
+TRNfamysN$yearseason <- as.character(TRNfamysN$yearseason)
+#make a loop to work out how many samples are in each season
+
+# TRNfamysN2 <- TRNfamysN %>% filter(yearseason == "2020 Autumn") %>% select(variable) %>% unique %>% nrow()
+
+
+seasonsv <- c(unique(TRNfamysN$yearseason))
+a = vector()
+b = vector()
+for (i in 1:length(seasonsv))
+{
+  ys <- seasonsv[i]
+  TRNfamysN2 <- TRNfamysN %>% filter(yearseason == ys) %>% select(variable) %>% unique %>% nrow()
+  print(TRNfamysN2)
+  a = rbind(ys,a)
+  b = rbind(TRNfamysN2,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+
+# V1 V2
+# ys      2020 Spring  1
+# ys.1    2020 Winter  4
+# ys.2    2020 Autumn  8
+# ys.3 2019-20 Summer  1
+# ys.4    2019 Spring 11
+# ys.5    2019 Winter  5
+# ys.6    2019 Autumn  3
+
+
+#now try genus level
+trnASVGENlongsam10ys <- trnASVGENlongsam10
+trnASVGENlongsam10ys$yearseason <- ifelse("2018-12-01" < trnASVGENlongsam10ys$Start_Date & trnASVGENlongsam10ys$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < trnASVGENlongsam10ys$Start_Date & trnASVGENlongsam10ys$Start_Date < "2020-02-28", "2019-20 Summer", paste(trnASVGENlongsam10ys$year,trnASVGENlongsam10ys$season,sep=" ")))
+#also add in the same missing yearseason
+#I do this by adding in a blank subset of the other data
+dfsubset <- trnASVGENlongsam10ys %>% filter(yearseason == "2019-20 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2019-20 Summer", replacement = "2018-19 Summer")
+#replace all the numbers in each column with 0 to make sure it subsets properly
+dfsubset$value[dfsubset$value<20] <- 0
+trnASVGENlongsam10yssubset <- rbind(trnASVGENlongsam10ys,dfsubset)
+
+trnASVGENlongsam10yssubset$yearseason = factor(trnASVGENlongsam10yssubset$yearseason , levels=yearmonthCOMPL) 
+
+
+trnGENbarplotys <- ggplot(trnASVGENlongsam10yssubset, aes(x=yearseason, y=value, fill=Genus)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ylab("Relative Abundance") + ggtitle("trnL-trnF Genus") +
+  scale_fill_manual(values=c("Pinus"="darkolivegreen","Eucalyptus"="lightpink","Dodonaea"="darkorange","Fraxinus"="lightskyblue","Dicksonia"="turquoise4","Allocasuarina"="firebrick","Cedrus"="darkolivegreen2","Hesperocyparis"="mediumpurple3","Ehrharta"="dodgerblue4","Cupressus"="mediumpurple4","others"="ivory4"))
+trnGENbarplotys
+
+
+#ITS
+ITSFamilyASVlongsam10ys <- ITSFamilyASVlongsam10
+ITSFamilyASVlongsam10ys$yearseason <- ifelse("2018-12-01" < ITSFamilyASVlongsam10ys$Start_Date & ITSFamilyASVlongsam10ys$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < ITSFamilyASVlongsam10ys$Start_Date & ITSFamilyASVlongsam10ys$Start_Date < "2020-02-28", "2019-20 Summer", paste(ITSFamilyASVlongsam10ys$year,ITSFamilyASVlongsam10ys$season,sep=" ")))
+#ITS is missing the 2019-20 Summer so I need to add that in
+dfsubset <- ITSFamilyASVlongsam10ys %>% filter(yearseason == "2018-19 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2018-19 Summer", replacement = "2019-20 Summer")
+#replace all the numbers in each column with 0 to make sure it subsets properly
+dfsubset$value[dfsubset$value<20] <- 0
+ITSFamilyASVlongsam10yssubset <- rbind(ITSFamilyASVlongsam10ys,dfsubset)
+
+ITSFamilyASVlongsam10yssubset$yearseason = factor(ITSFamilyASVlongsam10yssubset$yearseason , levels=yearmonthCOMPL) 
+
+
+ITSFAMbarplotys <- ggplot(ITSFamilyASVlongsam10yssubset, aes(x=yearseason, y=value, fill=Family)) +  
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ylab("Relative Abundance") + geom_bar(position='fill', stat='identity') + ggtitle("ITS2 Family") +
+  scale_fill_manual(values=c("Cupressaceae"="mediumpurple4","Fabaceae"="mediumorchid","Pinaceae"="darkolivegreen","Betulaceae"="gold","Sapindaceae"="darkorange","Brassicaceae"="violetred4","Nothofagaceae"="blue","Rhamnaceae"="sienna2","Plantaginaceae"="firebrick","Urticaceae"="turquoise","others"="ivory4"))
+ITSFAMbarplotys
+
+#calculate the N for each
+itsgenNys <- ITSFamilyASVlongsam10yssubset %>% select("Family", "variable", "value", "yearseason") %>% filter(value > 0)
+
+#set yearseason to characters
+itsgenNys$yearseason <- as.character(itsgenNys$yearseason)
+
+#make a vector of the seasons
+seasonsvys <- c(unique(itsgenNys$yearseason))
+#make a loop to work out how many samples are in each season
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvys))
+{
+  ys <- seasonsvys[i]
+  itsgenNys2 <- itsgenNys %>% filter(yearseason == ys) %>% select(variable) %>% unique %>% nrow()
+  print(itsgenNys2)
+  a = rbind(ys,a)
+  b = rbind(itsgenNys2,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'season'
+names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+
+# season  n
+# ys      2020 Spring  2
+# ys.1    2020 Winter  3
+# ys.2    2020 Autumn  1
+# ys.3    2019 Spring 10
+# ys.4    2019 Winter  8
+# ys.5    2019 Autumn  1
+# ys.6 2018-19 Summer  4
+
+#now do genus
+ITSASVGENlongsam10ys <- ITSASVGENlongsam10 
+ITSASVGENlongsam10ys$yearseason <- ifelse("2018-12-01" < ITSASVGENlongsam10ys$Start_Date & ITSASVGENlongsam10ys$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < ITSASVGENlongsam10ys$Start_Date & ITSASVGENlongsam10ys$Start_Date < "2020-02-28", "2019-20 Summer", paste(ITSASVGENlongsam10ys$year,ITSASVGENlongsam10ys$season,sep=" ")))
+#ITS is missing the 2019-20 Summer so I need to add that in
+dfsubset <- ITSASVGENlongsam10ys %>% filter(yearseason == "2018-19 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2018-19 Summer", replacement = "2019-20 Summer")
+#replace all the numbers in each column with 0 to make sure it subsets properly
+dfsubset$value[dfsubset$value<20] <- 0
+ITSASVGENlongsam10yssubset <- rbind(ITSASVGENlongsam10ys,dfsubset)
+
+ITSASVGENlongsam10yssubset$yearseason = factor(ITSASVGENlongsam10yssubset$yearseason , levels=yearmonthCOMPL) 
+
+
+ITSGENbarplotys <- ggplot(ITSASVGENlongsam10yssubset, aes(x=yearseason, y=value, fill=Genus)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank() ) + ylab("Relative Abundance") + ggtitle("ITS2 Genus") +
+  scale_fill_manual(values=c("Callitropsis"="mediumpurple3","Juniperus"="mediumpurple1","Cupressus"="mediumpurple4","Pinus"="darkolivegreen","Juniperus"="mediumpurple1","Betula"="gold","Medicago"="mediumorchid4","Dodonaea"="darkorange","Pisum"="mediumorchid1","Genista"="mediumorchid3","Lophozonia"="blue","others"="ivory4"))
+ITSGENbarplotys
+
+#Pollen count
+pcfamgenasvsam10ys <- pcfamgenasvsam10 
+pcfamgenasvsam10ys$yearseason <- ifelse("2018-12-01" < pcfamgenasvsam10ys$Start_Date & pcfamgenasvsam10ys$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < pcfamgenasvsam10ys$Start_Date & pcfamgenasvsam10ys$Start_Date < "2020-02-28", "2019-20 Summer", paste(pcfamgenasvsam10ys$year,pcfamgenasvsam10ys$season,sep=" ")))
+#there are no yearseasons missing so I don't need to add them in like with ITS and trnL-trnF
+
+pcfamgenasvsam10ys$yearseason = factor(pcfamgenasvsam10ys$yearseason , levels=yearmonthCOMPL) 
+
+
+PCFAMbarplotys <- ggplot(pcfamgenasvsam10ys, aes(x=yearseason, y=value, fill=Family)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank()) + ylab("Relative Abundance") + ggtitle("Pollen Count Family") +
+  scale_fill_manual(values=c("Cupressaceae"="mediumpurple4","Betulaceae"="gold","Myrtaceae"="lightpink","Sapindaceae"="darkorange","Casuarinaceae"="firebrick","Poaceae"="dodgerblue4","Salicaceae"="palegreen3","Oleaceae"="lightskyblue","Pinaceae"="darkolivegreen","Polygonaceae"="khaki","others"="ivory4"))
+PCFAMbarplotys
+
+#calculate the N for each yearseason
+PCgenNys <- pcfamgenasvsam10ys %>% select("Family", "variable", "value", "yearseason") %>% filter(value > 0)
+
+#set yearseason to characters
+PCgenNys$yearseason <- as.character(PCgenNys$yearseason)
+
+#make a vector of the seasons
+seasonsvys <- c(unique(PCgenNys$yearseason))
+#make a loop to work out how many samples are in each season
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvys))
+{
+  ys <- seasonsvys[i]
+  PCgenNys2 <- PCgenNys %>% filter(yearseason == ys) %>% select(variable) %>% unique %>% nrow()
+  print(PCgenNys2)
+  a = rbind(ys,a)
+  b = rbind(PCgenNys2,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'season'
+names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+
+# season  n
+# ys      2020 Spring 10
+# ys.1    2020 Winter 14
+# ys.2    2020 Autumn 13
+# ys.3 2019-20 Summer 12
+# ys.4    2019 Spring 12
+# ys.5    2019 Winter 13
+# ys.6    2019 Autumn 13
+# ys.7 2018-19 Summer 13
+
+
+#now do genus
+pcgenasvsam10ys <- pcgenasvsam10 
+pcgenasvsam10ys$yearseason <- ifelse("2018-12-01" < pcgenasvsam10ys$Start_Date & pcgenasvsam10ys$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < pcgenasvsam10ys$Start_Date & pcgenasvsam10ys$Start_Date < "2020-02-28", "2019-20 Summer", paste(pcgenasvsam10ys$year,pcgenasvsam10ys$season,sep=" ")))
+#there are no yearseasons missing so I don't need to add them in like with ITS and trnL-trnF
+
+pcgenasvsam10ys$yearseason = factor(pcgenasvsam10ys$yearseason , levels=yearmonthCOMPL) 
+
+
+PCGenbarplotys <- ggplot(pcgenasvsam10ys, aes(x=yearseason, y=value, fill=Genus)) + geom_bar(position='fill', stat='identity') + 
+  theme(axis.title.x=element_blank()) + ylab("Relative Abundance") + ggtitle("Pollen Count Genus") +
+  scale_fill_manual(values=c("Cupressaceae*"="mediumpurple4","Myrtaceae*"="lightpink","Dodonaea"="darkorange","Betula"="gold","Allocasuarina"="firebrick","Poaceae*"="dodgerblue4","Oleaceae*"="lightskyblue","Pinus"="darkolivegreen","Salix"="palegreen3","Rumex"="khaki","others"="ivory4"))
+PCGenbarplotys
+
+#put them all together
+PCFAMbarplotys
+PCGenbarplotys
+ITSFAMbarplotys
+ITSGENbarplotys
+trnFAMbarplotys
+trnGENbarplotys
+
+yscomp <- plot_grid(PCFAMbarplotys,ITSFAMbarplotys,trnFAMbarplotys,PCGenbarplotys,ITSGENbarplotys,trnGENbarplotys,trnGENbarplotys,
+                       ncol=3, nrow=2, align="v")
+yscomp
+
+
+
+###Mantel Tests----
+
+#do trnL-trnF vs PC first
+trnASV <- as.data.frame(TRphyloREDO@otu_table)
+#290 x 33
+trnsamples <- colnames(trnASV)
+#now the PC table
+PCasvman <- as.data.frame(t(PCASV))
+#it needs to only compare the samples that are in trnL-trnF when PC normally has heaps more
+PCtrnubset <- PCasvman %>% dplyr::select(trnsamples)
+
+#29 x 33
+
+#now my PC one is PCasvsubset and my trnL-trnF one is trnASV
+#make the avgdist table for trnL-trnF
+trnLmantelmatrix <- avgdist(t(TRphyloREDO@otu_table), sample = 100, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray")
+#33 x 33
+#make the matrix for the PC one too
+PCtrnsubsetTRN<-vegdist(t(PCtrnubset), method="bray")
+#33 x 33
+PCvstrn <- mantel(trnLmantelmatrix, PCtrnsubsetTRN, method="spearman", permutations = 9999, na.rm=TRUE)
+PCvstrn
+#mantel stat 0.41 significant 1e-04
+TvsPCmantel <- plot(trnLmantelmatrix ~ PCtrnsubsetTRN, xlab = "Pollen Count bray dissimilarity", ylab="trnL-trnF averaged subsambled dissimilarity")
+
+
+#Do ITS2 vs pollen count
+ITSASVs <- as.data.frame(ITSphyloPLANTfilter@otu_table)
+ITS2mantelmatrix <- avgdist(t(ITSASVs), sample = 100, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray")
+#get a matrix of the rownames
+ITSsamples <- colnames(ITSASVs)
+
+PCASVs <- as.data.frame(t(PCASV))
+PCitssubset <- PCASVs %>% dplyr::select(all_of(ITSsamples))
+dim(PCitssubset) # 29 x 29
+PC.distit <- vegdist(t(PCitssubset), method="bray")
+PC.distit
+PCvsITS2 <- mantel(ITS2mantelmatrix, PC.distit, method="spearman", permutations = 9999, na.rm=TRUE)
+PCvsITS2
+PCvsITSmantel <- plot(PC.distit ~ ITS2mantelmatrix, xlab = "ITS2 averaged subsambled dissimilarity", ylab="Pollen Count bray dissimilarity")
+#mantel stat 0.55 significant 1e-04
+
+
+###Now do trnLvsITS
+#I have to work out which ones are in common between them
+itsandtrn <- intersect(ITSsamples,trnsamples)
+itsandtrn
+
+#ITS to only have the common elements
+ITSplantASV3 <- ITSASVs %>% dplyr::select(all_of(itsandtrn))
+trntrnF3 <- as.data.frame(TRphyloREDO@otu_table) %>% dplyr::select(all_of(itsandtrn))
+
+ITS2mantelmatrix2 <- avgdist(t(ITSplantASV3), sample = 100, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray")
+trnmantelmatrix2 <- avgdist(t(trntrnF3), sample = 100, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray")
+
+trnvsITS2 <- mantel(ITS2mantelmatrix2, trnmantelmatrix2, method="spearman", permutations = 9999, na.rm=TRUE)
+trnvsITS2
+
+TvsITSmantel <- plot(trnmantelmatrix2 ~ ITS2mantelmatrix2, xlab = "ITS2 averaged subsambled dissimilarity", ylab="trnL-trnF averaged subsambled dissimilarity")
+
+##mantel stat 0.3937, 5e-04
+
+rm(ITS2mantelmatrix,ITS2mantelmatrix2,itsandtrn,ITSsamples,PC.dist,PC.distit,PCtrnsubsetTRN,PCvsITSmantel,trnLmantelmatrix,trnmantelmatrix2,trnsamples,TvsITSmantel,TvsPCmantel)
+rm(ITSvs,ITSASvs,ITSplantASV3,PCasvman,PCitssubset,PCvsITS2,PCvstrn,trnASV,trntrnF3,trnvsITS2,PCtrnubset)
+
+
+###NMDS----
+#Pollen Counts
+####I think I can get away with not transforming the counts Haberle transformed to proportions but I don't know
+bac.dist<-vegdist(PCASV, method="bray")
+bac.nmds<-metaMDS(bac.dist, k=2, try=100)
+bac.nmds$stress #0.146
+PCMETA$Axis01<-bac.nmds$points[,1]
+PCMETA$Axis02<-bac.nmds$points[,2]
+
+PCSeasonnmds<-ggplot(PCMETA, aes(x=Axis01, y=Axis02))+
+  geom_point(aes(color=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')))) +
+  labs(color = "Season") + ggtitle("Pollen Count") + #theme(legend.position="none") +
+  scale_color_manual(values = c("Summer"="gold2", "Autumn"="sienna1", "Winter"="deepskyblue", "Spring"="springgreen1"))
+PCSeasonnmds
+permanova = adonis2(bac.dist ~ season, data=PCMETA)
+permanova
+#R2 = 0.36, p=0.001
+
+#trnL-trnF
+TRavgmatrix <- avgdist(t(TRphyloREDO@otu_table), sample = 100, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray")
+
+nmds<-metaMDS(TRavgmatrix, k=2, try=100)
+nmds$stress #0.191
+stress= paste("stress = ", round(nmds$stress, digits = 2))
+trnMETA <- as.data.frame(as.matrix(TRphyloREDO@sam_data))
+trnMETA$Axis01<-nmds$points[,1]
+trnMETA$Axis02<-nmds$points[,2]
+
+trnLnmds<-ggplot(trnMETA, aes(x=Axis01, y=Axis02)) +
+  geom_point(aes(color=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')))) + labs(color = "Season") +
+  ggtitle("trnL-trnF") + scale_color_manual(values = c("Summer"="gold2", "Autumn"="sienna1", "Winter"="deepskyblue", "Spring"="springgreen1"))
+trnLnmds
+
+permanova = adonis2(TRavgmatrix ~ season, data = trnMETA)
+permanova
+#R2 = 0.19 p=0.01
+
+#now do ITS2
+ITSASV <- as.data.frame(ITSphyloPLANTfilter@otu_table)
+
+ITS2mantelmatrix2 <- avgdist(t(ITSASV), sample = 100, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray")
+nmds<-metaMDS(ITS2mantelmatrix2, k=2, try=100)
+nmds$stress #0.12
+stress= paste("stress = ", round(nmds$stress, digits = 2))
+
+ITSmeta <- as.data.frame(as.matrix(ITSphyloPLANTfilter@sam_data))
+ITSmeta$Axis01<-nmds$points[,1]
+ITSmeta$Axis02<-nmds$points[,2]
+
+ITSnmds<-ggplot(ITSmeta, aes(x=Axis01, y=Axis02)) +
+  geom_point(aes(color=factor(season, level = c('Summer', 'Autumn', 'Winter', 'Spring')))) + labs(color = "Season") + #theme(legend.position="none") +
+  ggtitle("ITS2") + scale_color_manual(values = c("Summer"="gold2", "Autumn"="sienna1", "Winter"="deepskyblue", "Spring"="springgreen1"))
+ITSnmds
+
+permanova = adonis2(ITS2mantelmatrix2 ~ season, data=ITSmeta)
+permanova
+
+#R2 = 0.269 and p=0.001
+
+#combine graphs together
+combinednmds <- ggarrange(PCSeasonnmds,ITSnmds,trnLnmds, nrow=1, ncol=3, common.legend = TRUE)
+combinednmds
+
+rm(bac.nmds,combinednmds,ITSnmds,PCSeasonnmds,trnLnmds,trnMETA,bac.dist,ITS2mantelmatrix2,TRavgmatrix,ITSASV,ITSASVs,ITSmeta,ITSOTU,nmds,PCASVs,PCfamiliesbracket,permanova,TAXphylo,ITSmantelmatrix2,stress)
+
+
+
+###Pollen Taxa over time-----
+#This shows the time patterns of the pollen count taxa over time
+PCfamiliesbracket <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/PCfamiliesbracket.csv",header=TRUE)
+
+PCtaxorder <- as.data.frame(colSums(PCASV)) %>% arrange(desc(colSums(PCASV)))
+PCtaxorder <- PCtaxorder %>% filter(!row_number() %in% c(5)) %>% rownames_to_column("variable")
+PCtaxorder1 <- left_join(PCtaxorder,PCfamiliesbracket,by="variable")
+PCorder <- c(PCtaxorder1$genusfamily)
+
+#merge ASV and metadata
+
+PCASVlong <- PCASV %>% select(-"Other") %>% rownames_to_column("Tube.Code") %>% melt()
+PCMETA1 <- PCMETA %>% rownames_to_column("Tube.Code")
+PCASVlongMETA <- left_join(PCASVlong,PCMETA1, by="Tube.Code")
+
+PCASVlongMETA1 <- PCASVlongMETA
+PCASVlongMETA2 <- left_join(PCASVlongMETA1,PCfamiliesbracket,by="variable")
+
+PCASVlongMETA2$genusfamily = factor(PCASVlongMETA2$genusfamily , levels=PCorder) 
+
+#now I want to add families to the titles of each taxa
+
+PCtaxaSD <- ggplot(PCASVlongMETA2, aes(x=Start_Date, y=value, colour=genusfamily)) + geom_line(size =1) +  
+  theme_minimal() + theme(legend.position="none", axis.title = element_text(size=20), strip.text.x = element_text(size=15)) +
+  scale_x_datetime(date_labels = "%y (%b)", date_breaks = "6 months") + ylab("Pollen grains /  metre of air / week") + 
+  xlab("Sampling Date") + facet_wrap(~ genusfamily, scales = "free", ncol=4) 
+PCtaxaSD
+
+rm(PCASVlong,PCtaxaSDPCASVlongMETA,PCASVlongMETA1,PCASVlongMETA2,PCfamiliesbracket,PCMETA1,PCRtaxaSD,PCtaxorder,PCtaxorder1,PCorder)
+
+###Pollen Count timeseries
+PCASVlong <- PCASV %>% select(-"Other") %>% rownames_to_column("Tube.Code") %>% melt()
+PCMETA1 <- PCMETA %>% rownames_to_column("Tube.Code")
+#add in the yearseason column
+PCMETA1$Start_Date <- as.Date(PCMETA1$Start_Date , format = "%Y-%m-%d")
+PCMETA1$yearseason <- ifelse("2018-12-01" < PCMETA1$Start_Date & PCMETA1$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < PCMETA1$Start_Date & PCMETA1$Start_Date < "2020-02-28", "2019-20 Summer", paste(PCMETA1$year,PCMETA1$season,sep=" ")))
+#add in a monthyear column
+PCMETA1$month = factor(PCMETA1$month , levels=c('12', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11'), labels=c('Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov')) 
+PCMETA1$monthyear = paste(PCMETA1$month,PCMETA1$year)
+#join together
+PCASVlongMETA <- left_join(PCASVlong,PCMETA1, by="Tube.Code")
+PCASVlongMETAPOA <- PCASVlongMETA %>% filter(variable == "Poaceae")
+#set the order for month year
+monthyearorder <- c("Dec 2018", "Jan 2019", "Feb 2019", "Mar 2019", "Apr 2019", "May 2019", "Jun 2019", "Jul 2019", "Aug 2019", "Sep 2019", "Oct 2019", "Nov 2019", "Dec 2019", "Jan 2020", "Feb 2020", "Mar 2020", "Apr 2020", "May 2020", "Jun 2020", "Jul 2020", "Aug 2020", "Sep 2020", "Oct 2020", "Nov 2020")
+PCASVlongMETAPOA$monthyear = factor(PCASVlongMETAPOA$monthyear , levels=monthyearorder) 
+
+#graph it
+# PCpoaTS <- ggplot(PCASVlongMETAPOA, aes(x=monthyear, y=value)) + geom_jitter() + 
+#   geom_boxplot(outlier.shape = NA, alpha = 2) + theme_bw() + theme(axis.title.x=element_blank()) +
+#   ylab("Pollen grains /  metre of air / week")
+# PCpoaTS
+
+# Custom function to calculate the count (N) for each factor
+calculate_count <- function(x) {
+  n <- length(x)
+  return(data.frame(y = max(x), label = paste("N =", n)))
+}
+
+PCpoaTS <- ggplot(PCASVlongMETAPOA, aes(x=monthyear, y=value)) + geom_jitter(colour="darkorange1",width=0.2, size=2) + 
+  stat_summary(fun.data=median_hilow, , geom = "pointrange", colour = "black", position = position_dodge(0.2)) + 
+  theme_bw() + theme(axis.title.x=element_blank()) +
+  ylab("Pollen grains /  metre of air / week")
+PCpoaTS
+
+#do the same for Cupressaceae
+PCpoaTS <- ggplot(PCASVlongMETAPOA, aes(x=monthyear, y=value)) + geom_jitter(colour="darkorange1",width=0.2, size=2) + 
+  stat_summary(fun.data=median_hilow, , geom = "pointrange", colour = "black", position = position_dodge(0.2)) + 
+  theme_bw() + theme(axis.title.x=element_blank()) +
+  ylab("Pollen grains /  metre of air / week")
+PCpoaTS
+
+
+PCASVlongMETACup <- PCASVlongMETA %>% filter(variable == "Cupressaceae")
+PCASVlongMETACup$monthyear = factor(PCASVlongMETACup$monthyear , levels=monthyearorder) 
+PCcupTS <- ggplot(PCASVlongMETACup, aes(x=monthyear, y=value)) + geom_jitter(colour="darkorange1",width=0.2, size=2) + 
+  stat_summary(fun.data=median_hilow, , geom = "pointrange", colour = "black", position = position_dodge(0.2)) +
+  theme_bw() + theme(axis.title.x=element_blank()) +
+  ylab("Pollen grains /  metre of air / week")
+PCcupTS
+
+
+#do the same for Myrtaceae
+PCASVlongMETAMyr <- PCASVlongMETA %>% filter(variable == "Myrtaceae")
+PCASVlongMETAMyr$monthyear = factor(PCASVlongMETAMyr$monthyear , levels=monthyearorder) 
+PCmyrTS <- ggplot(PCASVlongMETAMyr, aes(x=monthyear, y=value)) + geom_jitter() + 
+  geom_boxplot(outlier.shape = NA, alpha = 2) + theme_bw() + theme(axis.title.x=element_blank()) +
+  ylab("Pollen grains /  metre of air / week")
+PCmyrTS
+
+
+
+###Poaceae Heatmaps----
+
+
+
+
+###Start with ITS2
+
+#make sure the season month thing is correct here too
+ITSMETA <- as.data.frame(as.matrix(ITSphyloPLANTfilter@sam_data))
+ITSMETA1 <- ITSMETA %>% rownames_to_column("Tube.Code")
+
+ITSMETA1$Start_Date <- as.Date(ITSMETA1$Start_Date , format = "%Y-%m-%d")
+ITSMETA1$yearseason <- ifelse("2018-12-01" < ITSMETA1$Start_Date & ITSMETA1$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < ITSMETA1$Start_Date & ITSMETA1$Start_Date < "2020-02-28", "2019-20 Summer", paste(ITSMETA1$year,ITSMETA1$season,sep=" ")))
+
+#make the taxonomy and asv table
+ITSTAX <- as.data.frame(ITSphyloPLANTfilter@tax_table) %>% rownames_to_column("X")
+ITSASV <- as.data.frame(ITSphyloPLANTfilter@otu_table) %>% rownames_to_column("X")
+
+ITSASVTAX <- left_join(ITSTAX,ITSASV,by="X")
+
+
+ITSASVTAXPoa <- ITSASVTAX %>% filter(Family == "f__Poaceae")
+ITSASVTAXPoa$Genus <- gsub(x = ITSASVTAXPoa$Genus, pattern = "g__", replacement = "")
+ITSASVTAXPoa$Family <- gsub(x = ITSASVTAXPoa$Family, pattern = "f__", replacement = "")
+
+ITSASVTAXPoa$taxid = paste(ITSASVTAXPoa$Family,ITSASVTAXPoa$Genus,sep="-")
+
+
+ITSpoatax <- ITSASVTAXPoa %>% select("taxid","Family","Genus") %>% unique()
+
+ITSASVTAXPoa1 <- ITSASVTAXPoa %>% select(38,9:37) %>% dplyr::group_by(taxid) %>% summarise_all(sum)
+
+ITSASVTAXPoa1long <- ITSASVTAXPoa1 %>% melt()
+names(ITSASVTAXPoa1long)[names(ITSASVTAXPoa1long) == 'variable'] <- 'Tube.Code'
+names(ITSMETA1)[names(ITSMETA1) == 'X'] <- 'Tube.Code'
+ITSASVTAXPoa1longMETA <- left_join(ITSASVTAXPoa1long,ITSMETA1,by="Tube.Code")
+
+ITSASVTAXPoa1longMETAtax <- left_join(ITSASVTAXPoa1longMETA, ITSpoatax, by="taxid")
+
+ITSASVTAXPoa1longMETAtax$Genus[is.na(ITSASVTAXPoa1longMETAtax$Genus)] <- "unclassified"
+
+#group together by season
+#I have to make a column that groups them better
+ITSPoaSeasonag <- ITSASVTAXPoa1longMETAtax %>% select("Genus", "value", "yearseason") 
+ITSPoaSeasonag$GenusYearSeason = paste(ITSPoaSeasonag$Genus,ITSPoaSeasonag$yearseason,sep="-")
+ITSPoaSeasonag2 <- ITSPoaSeasonag %>% select("GenusYearSeason", "value") 
+ITSPoaSeasonag3 <- ITSPoaSeasonag2 %>% dplyr::group_by(GenusYearSeason) %>% summarise(count = sum(value))
+ITSPoaSeasonag4 <- left_join(ITSPoaSeasonag3,ITSPoaSeasonag,by="GenusYearSeason") %>% select("Genus","yearseason","count") %>% unique()
+
+#turn counts to relative abundances
+ITSPoaSeasonag4RA <- ITSPoaSeasonag4 %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+#make sure each genus is displayed by total abundance
+#ggplot displays them with the heaviest
+itspoagenusrank <- ITSPoaSeasonag4RA %>% na.omit() %>% group_by(Genus) %>% mutate(RASum = sum(RelativeAbundance)) %>% select("Genus","RASum") %>% unique() %>% arrange(RASum)
+
+#now you have to put in the subfamily information into the table
+itspoarank <- c("unclassified", "Leymus", "Lolium","Festuca","Anthoxanthum" ,"Elymus","Bromus",  "Microlaena", "Poa", "Cynodon",      "Holcus" )   
+write.csv(itspoarank,"C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/ITSgrassgenera.csv")
+#now open this in excel and write the subfamily information into that spreadsheet
+itsgenussubfamily <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/ITSgrassgenerasubfamily.csv")
+
+ITSPoaSeasonag4RAsf <- left_join(ITSPoaSeasonag4RA,itsgenussubfamily,by="Genus")
+
+###I have to work our how many samples are in each month
+ITSASVTAXPoa1longMETAtax
+
+#and remove all the things with zero as the count and remove repeats
+ITSlNcalc <- ITSASVTAXPoa1longMETAtax %>% select("Tube.Code", "Genus", "yearseason", "value") %>% filter(value > 0) %>% unique()
+ITSlNcalc1 <- ITSlNcalc %>% filter(Genus %in% itspoarank)
+#i didn't remove any genera so this code isn't that important
+
+unique(ITSlNcalc1$yearseason)
+seasonsvector <- c("2018-19 Summer", "2019 Winter",    "2019 Spring",    "2020 Autumn",    "2020 Winter") 
+
+#This loop sets how many samples are in each year-season combination
+
+nrowdf = data.frame()
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvector))
+{
+  ys <- seasonsvector[i]
+  ITSlNcalc2 <- ITSlNcalc1 %>% filter(yearseason == ys) %>% select(Tube.Code) %>% unique %>% nrow()
+  print(ITSlNcalc2)
+  a = rbind(ys,a)
+  b = rbind(ITSlNcalc2,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'yearseason'
+names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+
+###bind this back to the dataframe
+ITSPoaSeasonag4RAsfN <- left_join(ITSPoaSeasonag4RAsf,nrowdf1,by="yearseason")
+
+
+ITSPoaSeasonag4RAsfN$Genus = factor(ITSPoaSeasonag4RAsfN$Genus , levels=itspoarank)
+
+yearmonthCOMPL <-  c("2018-19 Summer",   "2019 Autumn", "2019 Winter",  "2019 Spring", "2019-20 Summer", "2020 Autumn", "2020 Winter", "2020 Spring")  
+ITSPoaSeasonag4RAsfN$yearseason = factor(ITSPoaSeasonag4RAsfN$yearseason , levels=yearmonthCOMPL)
+
+#work out how to add in columns so that the missing seasons get a space
+ITSpoaseasons <- unique(ITSPoaSeasonag4RAsfN$yearseason)
+#work out the unique seasons present
+setdiff(yearmonthCOMPL,ITSpoaseasons)
+#2019-20 Summer is the only one not in the df
+
+#this is just to make sure that 2019-20 Summer comes out in the dataframe so at least it is continuous temporally
+#set apart a section of the df and rename the 2019-20 Summer part
+dfsubset <- ITSPoaSeasonag4RAsfN %>% filter(yearseason == "2019 Autumn")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2019 Autumn", replacement = "2019-20 Summer")
+ITSPoaSeasonag4RAsfNC <- rbind(ITSPoaSeasonag4RAsfN,dfsubset)
+
+#bind back to the original
+ITSPoaSeasonag4RAsfNC <- rbind(ITSPoaSeasonag4RAsfN,ys2)
+
+#make sure the dataframe makes sense overall
+ITSPoaSeasonag4RAsfNC$yearseason = factor(ITSPoaSeasonag4RAsfNC$yearseason , levels=yearmonthCOMPL)
+
+#it worked thank goodness
+
+ggplot(ITSPoaSeasonag4RAsfNC, aes(x=yearseason, y=RelativeAbundance, fill=Genus)) +
+  geom_bar(position='fill', stat='identity', width = 0.85) + theme_classic() +  scale_y_continuous(expand = c(0, 0)) + theme(legend.position = "bottom") +
+  xlab("year & month") + ylab("Relative Abundance") + ggtitle("ITS2 Poaceae") + scale_fill_brewer(palette="Paired") #+ stat_n_text()
+
+
+
+itspoaheat <- ggplot(ITSPoaSeasonag4RAsfNC, aes(x=yearseason, y=Genus))  +
+  geom_tile(aes(fill=RelativeAbundance)) + labs(fill = "Relative Abundance", x="year & season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "firebrick3", limits=c(0,1), na.value="white") + theme(axis.text.y = element_text(size=10, angle=45))
+  #geom_text(aes(label=n))
+itspoaheat
+
+###Subfamily
+
+ITSPOASF <- ITSPoaSeasonag4RAsfNC %>% select("yearseason", "count", "Subfamily")
+ITSPOASF$sfc <- paste(ITSPOASF$yearseason,ITSPOASF$Subfamily) 
+ITSPOASFjoiner <- ITSPOASF %>% select("sfc", "Subfamily", "yearseason") %>% unique()
+ITSPOASF2 <- ITSPOASF %>% ungroup() %>% select("sfc","count") %>% dplyr::group_by(`sfc`) %>% summarise_all(sum) #%>% mutate(RelativeAbundance = count/sum(count))
+ITSPOASF3 <- left_join(ITSPOASF2,ITSPOASFjoiner,by="sfc") %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+sforder <- c("unclassified", "Chloridoideae", "Oryzoideae",    "Pooideae") 
+ITSPOASF4$Subfamily = factor(ITSPOASF4$Subfamily , levels=sforder)
+
+
+
+###Make the subfamily graph too
+itspoaheatsf <- ggplot(ITSPOASF4, aes(x=yearseason, y=Subfamily))  +
+  geom_tile(aes(fill=RelativeAbundance)) + labs(fill = "Relative Abundance", x="year & season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "firebrick3", limits=c(0,1), na.value="white") + theme(axis.text.y = element_text(size=15))
+#geom_text(aes(label=n))
+itspoaheatsf
+
+
+
+
+
+#now try trnL poaceae
+#set up main dataframes
+trnTAX <- as.data.frame(TRphyloREDO@tax_table) %>% rownames_to_column("ASVID")
+trnASV <- as.data.frame(TRphyloREDO@otu_table) %>% rownames_to_column("ASVID")
+trnMETA <- as.data.frame(as.matrix(TRphyloREDO@sam_data)) %>% rownames_to_column("Tube.Code")
+
+trnMETA$Start_Date <- as.Date(trnMETA$Start_Date , format = "%Y-%m-%d")
+trnMETA$yearseason <- ifelse("2018-12-01" < trnMETA$Start_Date & trnMETA$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < trnMETA$Start_Date & trnMETA$Start_Date < "2020-02-28", "2019-20 Summer", paste(trnMETA$year,trnMETA$season,sep=" ")))
+
+
+
+trnASVTAX <- left_join(trnTAX,trnASV,by="ASVID")
+trnASVTAXPoa <- trnASVTAX %>% filter(Family == "Poaceae")
+trnASVTAXPoa$taxid = paste(trnASVTAXPoa$Family,trnASVTAXPoa$Genus,sep="-")
+PoaTaxID <- trnASVTAXPoa %>% select("taxid","Family","Genus")
+trnASVTAXPoaID <- trnASVTAXPoa %>% select(42,9:41) %>% dplyr::group_by(`taxid`) %>% summarise_all(sum)
+
+
+#Atherotaxis has no entries so we can remove that row
+# trnASVTAXPCupID <- trnASVTAXPCupID %>% filter(!taxid == "Athrotaxis-NA")
+trnASVTAXPoaIDlong <- trnASVTAXPoaID %>% melt()
+names(trnASVTAXPoaIDlong)[names(trnASVTAXPoaIDlong) == 'variable'] <- 'Tube.Code'
+trnASVTAXPoaIDlongMETA <- left_join(trnASVTAXPoaIDlong,trnMETA,by="Tube.Code")
+trnASVTAXPoaIDlongMETAtax <- left_join(trnASVTAXPoaIDlongMETA,PoaTaxID,by="taxid")
+#group together by season
+#I have to make a column that groups them better
+
+trnPoaSeasonag <- trnASVTAXPoaIDlongMETAtax %>% select("Genus", "value", "yearseason") 
+trnPoaSeasonag$Genus[is.na(trnPoaSeasonag$Genus)] <- "unclassified"
+
+
+trnPoaSeasonag$GenusYearSeason = paste(trnPoaSeasonag$Genus,trnPoaSeasonag$yearseason,sep="-")
+trnPoaSeasonag2 <- trnPoaSeasonag %>% select("GenusYearSeason", "value") 
+trnPoaSeasonag3 <- trnPoaSeasonag2 %>% dplyr::group_by(GenusYearSeason) %>% summarise(count = sum(value))
+trnPoaSeasonag4 <- left_join(trnPoaSeasonag3,trnPoaSeasonag,by="GenusYearSeason") %>% select("Genus","yearseason","count") %>% unique()
+
+#try to turn these into relative abundances
+trnPoaSeasonag4RA <- trnPoaSeasonag4 %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+#make sure each genus is ranked by total abundance
+#ggplot displays them with the heaviest
+poagenusrank <- trnPoaSeasonag4RA %>% na.omit() %>% group_by(Genus) %>% mutate(RASum = sum(RelativeAbundance)) %>% select("Genus","RASum") %>% unique() %>% arrange(RASum)
+#these are all zero "Campeiostachys" "Eremopyrum"     "Sesleriella"    "Tenaxia"
+#and these are all less than 1% total cumulative abundance "Cynodon"        "Tetrarrhena"    "Podagrostis"
+trnPoaSeasonag4RA1 <- trnPoaSeasonag4RA %>% filter(!Genus %in% c("Campeiostachys", "Eremopyrum",     "Sesleriella",    "Tenaxia", "Cynodon", "Tetrarrhena",  "Podagrostis"))
+
+poarank <-  c( "unclassified", "Dactylis",   "Festuca",  "Hordeum",        "Bromus",         "Lolium",         "Poa",        "Ehrharta") 
+write.csv(poarank,"C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/trnLgrassgenera.csv")
+#open it in excel and add in the subfamilies
+trnLpoasubfam <- read.csv("C:/Users/ljtegart/OneDrive - University of Tasmania/Dust/DustAnalysis/DustAnalysisV1/trnLgrassgenerasf.csv")
+trnPoaSeasonag4RAsf <- left_join(trnPoaSeasonag4RA1,trnLpoasubfam,by="Genus")
+
+trnPoaSeasonag4RAsf$Genus = factor(trnPoaSeasonag4RAsf$Genus , levels=poarank) 
+trnPoaSeasonag4RAsf$yearseason = factor(trnPoaSeasonag4RAsf$yearseason , levels=yearmonthCOMPL) 
+
+#the graph is missing 2018-19 Summer so I will add it in
+#set apart a section of the df and rename the 2018-19 Summer part
+dfsubset <- trnPoaSeasonag4RAsf %>% filter(yearseason == "2019-20 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2019-20 Summer", replacement = "2018-19 Summer")
+#replace all the numbers in each column with 0 to make sure it subsets properly
+dfsubset$count[dfsubset$count<20] <- 0
+dfsubset$RelativeAbundance[dfsubset$RelativeAbundance<20] <- 0
+trnPoaSeasonag4RAsfC <- rbind(trnPoaSeasonag4RAsf,dfsubset)
+
+# ggplot(trnPoaSeasonag4RAsfC, aes(x=yearseason, y=RelativeAbundance, fill=Genus)) +
+#   geom_bar(position='fill', stat='identity', width = 0.85) + theme_classic() +  scale_y_continuous(expand = c(0, 0)) + theme(legend.position = "bottom") +
+#   xlab("year & month") + ylab("Relative Abundance") + ggtitle("trnL-trnF Poaceae") + scale_fill_brewer(palette="Paired") #+ stat_n_text()
+
+trnPoaSeasonag4RAsfC$yearseason = factor(trnPoaSeasonag4RAsfC$yearseason , levels=yearmonthCOMPL) 
+
+trnpoaheat <- ggplot(trnPoaSeasonag4RAsfC, aes(x=yearseason, y=Genus))  +
+  geom_tile(aes(fill=RelativeAbundance)) + labs(fill = "Relative Abundance", x="year & season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "dodgerblue3", limits=c(0,1), na.value="white") + theme(axis.text.y = element_text(size=10, angle=45))
+trnpoaheat
+#geom_text(aes(label=n))
+
+###Do the same thing for subfamilies
+#This is different to the ITS code because I had to remove the genera that were barely present, but I wanted to display these here so it's clear that the subfamily is detected
+#because of the way I have written the code, any of the genera that have no subfamily listed are absent so I will filter them out
+TRNPOASF <- left_join(trnPoaSeasonag4RA,trnLpoasubfam,by="Genus") %>% filter(!is.na(Subfamily))
+TRNPOASF2 <- TRNPOASF %>% select("yearseason", "count", "Subfamily")
+TRNPOASF2$sfc <- paste(TRNPOASF2$yearseason,TRNPOASF2$Subfamily) 
+TRNPOASFjoiner <- TRNPOASF2 %>% select("sfc", "Subfamily", "yearseason") %>% unique()
+TRNPOASF3 <- TRNPOASF2 %>% ungroup() %>% select("sfc","count") %>% dplyr::group_by(`sfc`) %>% summarise_all(sum) #%>% mutate(RelativeAbundance = count/sum(count))
+TRNPOASF4 <- left_join(TRNPOASF3,ITSPOASFjoiner,by="sfc") %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+#add in the blank df for 2018-19 Summer
+dfsubset <- TRNPOASF4 %>% filter(yearseason == "2019 Autumn")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2019 Autumn", replacement = "2018-19 Summer")
+dfsubset$RelativeAbundance[dfsubset$RelativeAbundance<20] <- 0
+TRNPOASF5 <- rbind(TRNPOASF4,dfsubset)
+
+sforder <- c("unclassified", "Chloridoideae", "Oryzoideae",    "Pooideae") 
+TRNPOASF5$Subfamily = factor(TRNPOASF5$Subfamily , levels=sforder)
+TRNPOASF5$yearseason = factor(TRNPOASF5$yearseason , levels=yearmonthCOMPL)
+
+trnpoaheatsf <- ggplot(TRNPOASF5, aes(x=yearseason, y=Subfamily))  +
+  geom_tile(aes(fill=RelativeAbundance)) + labs(fill = "Relative Abundance", x="year & season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "dodgerblue3", limits=c(0,1), na.value="white") + theme(axis.text.y = element_text(size=15))
+trnpoaheatsf
+
+
+###I have to work our how many samples are in each season
+trnASVTAXPoaIDlongMETAtax
+
+#and remove all the things with zero as the count and remove repeats
+trnLNcalc <- trnASVTAXPoaIDlongMETAtax %>% select("Tube.Code", "Genus", "yearseason", "value") %>% filter(value > 0) %>% unique()
+#change NA to unclassified
+trnLNcalc$Genus[is.na(trnLNcalc$Genus)] <- "unclassified"
+#only include the genera that were included in the heatmaps. i.e. exclude the rare genera
+trnLNcalc2 <- trnLNcalc %>% filter(Genus %in% poarank)
+
+
+unique(trnLNcalc2$yearseason)
+seasonsvector <- c("2019 Autumn",    "2019 Winter",    "2019 Spring",    "2019-20 Summer", "2020 Autumn",    "2020 Winter",    "2020 Spring")   
+
+#This loop sets how many samples are in each year-season combination
+# trnLNcalc3 <- trnLNcalc2 %>% filter(yearseason == "2019 Spring") %>% select(Tube.Code) %>% unique %>% nrow()
+nrowdf = data.frame()
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvector))
+{
+  ys <- seasonsvector[i]
+  trnLNcalc3 <- trnLNcalc2 %>% filter(yearseason == ys) %>% select(Tube.Code) %>% unique %>% nrow()
+  print(trnLNcalc3)
+  a = rbind(ys,a)
+  b = rbind(trnLNcalc3,b)
+}
+nrowdf = cbind(a,b)
+nrowdf1 <- as.data.frame(nrowdf)
+names(nrowdf1)[names(nrowdf1) == 'V1'] <- 'yearseason'
+names(nrowdf1)[names(nrowdf1) == 'V2'] <- 'n'
+
+###bind this back to the dataframe
+ITSPoaSeasonag4RAsfN <- left_join(ITSPoaSeasonag4RAsf,nrowdf1,by="yearseason")
+
+#add these values into the inkscape doc
+
+
+
+###Cupressaceae Heatmaps----
+trnASV <- as.data.frame(TRphyloREDO@otu_table) %>% rownames_to_column("ASVID")
+trnMETA <- as.data.frame(as.matrix(TRphyloREDO@sam_data)) %>% rownames_to_column("Tube.Code")
+trnTAX <- as.data.frame(TRphyloREDO@tax_table) %>% rownames_to_column("ASVID")
+
+#add in the yearseason column
+trnMETA$yearseason <- ifelse("2018-12-01" < trnMETA$Start_Date & trnMETA$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < trnMETA$Start_Date & trnMETA$Start_Date < "2020-02-28", "2019-20 Summer", paste(trnMETA$year,trnMETA$season,sep=" ")))
+
+trnASVTAX <- left_join(trnASV,trnTAX,by="ASVID")
+
+#Cupressaceae
+trnASVTAXCup <- trnASVTAX %>% filter(Family == "Cupressaceae")
+#note that there are no unclassified in here
+trnASVTAXCup$taxid = paste(trnASVTAXCup$Genus,trnASVTAXCup$Species,sep="-")
+CupTaxID <- trnASVTAXCup %>% select(42,39:41)
+trnASVTAXPCupID <- trnASVTAXCup %>% select(2:34,42) %>% dplyr::group_by(`taxid`) %>% summarise_all(sum)
+#Atherotaxis has no entries so we can remove that row
+trnASVTAXPCupID <- trnASVTAXPCupID %>% filter(!taxid == "Athrotaxis-NA")
+trnASVTAXPCupIDlong <- trnASVTAXPCupID %>% melt()
+names(trnASVTAXPCupIDlong)[names(trnASVTAXPCupIDlong) == 'variable'] <- 'Tube.Code'
+trnASVTAXPCupIDlongMETA <- left_join(trnASVTAXPCupIDlong,trnMETA,by="Tube.Code")
+trnASVTAXPCupIDlongMETAtax <- left_join(trnASVTAXPCupIDlongMETA,CupTaxID,by="taxid")
+#group together by season
+#I have to make a column that groups them better
+
+trnCupSeasonag <- trnASVTAXPCupIDlongMETAtax %>% select("Genus", "value", "yearseason") 
+
+
+trnCupSeasonag$GenusYearSeason = paste(trnCupSeasonag$Genus,trnCupSeasonag$yearseason,sep="-")
+trnCupSeasonag2 <- trnCupSeasonag %>% select("GenusYearSeason", "value") 
+trnCupSeasonag3 <- trnCupSeasonag2 %>% dplyr::group_by(GenusYearSeason) %>% summarise(count = sum(value))
+trnCupSeasonag4 <- left_join(trnCupSeasonag3,trnCupSeasonag,by="GenusYearSeason") %>% select("Genus","yearseason","count") %>% unique()
+
+colnames(trnCupSeasonag4) <- c("Genus", "yearseason", "count")
+
+#try to turn these into relative abundances
+trnCupSeasonagRA <- trnCupSeasonag4 %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+#make sure each genus is displayed by total abundance
+#ggplot displays them with the heaviest
+cupgenusrank <- trnCupSeasonagRA %>% na.omit() %>% group_by(Genus) %>% mutate(RASum = sum(RelativeAbundance)) %>% select("Genus","RASum") %>% unique() %>% arrange(RASum)
+
+cuprank <- c(cupgenusrank$Genus)
+
+
+
+#add in the blank 2018-19 summer section
+dfsubset <- trnCupSeasonagRA %>% filter(yearseason == "2020 Spring")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2020 Spring", replacement = "2018-19 Summer")
+trnCupSeasonagRA1 <- rbind(trnCupSeasonagRA,dfsubset)
+
+trnCupSeasonagRA1$yearseason = factor(trnCupSeasonagRA1$yearseason , levels=yearmonthCOMPL) 
+
+trnCupSeasonagRA1$Genus = factor(trnCupSeasonagRA1$Genus , levels=cuprank) 
+
+trncupheat <- ggplot(trnCupSeasonagRA1, aes(x=yearseason, y=Genus, fill=RelativeAbundance)) +
+  geom_tile() + labs(fill = "Relative Abundance", x="Season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "dodgerblue3", limits=c(0,1), na.value="white") +
+  theme(axis.text.y = element_text(size=10, angle=45))
+trncupheat
+
+##calculate the N for each season
+###I have to work our how many samples are in each season
+trnASVTAXPCupIDlongMETAtax
+
+#and remove all the things with zero as the count and remove repeats
+trnLNcalc <- trnASVTAXPCupIDlongMETAtax %>% select("Tube.Code", "Genus", "yearseason", "value") %>% filter(value > 0) %>% unique()
+
+unique(trnLNcalc$yearseason)
+seasonsvector <- c("2019 Winter", "2019 Spring", "2020 Autumn", "2020 Winter")   
+
+#This loop sets how many samples are in each year-season combination
+nrowdf = data.frame()
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvector))
+{
+  ys <- seasonsvector[i]
+  trnLNcalc2 <- trnLNcalc %>% filter(yearseason == ys) %>% select(Tube.Code) %>% unique %>% nrow()
+  print(trnLNcalc2)
+  a = rbind(ys,a)
+  b = rbind(trnLNcalc2,b)
+}
+nrowdf = cbind(a,b)
+trncupnrowdf1 <- as.data.frame(nrowdf)
+
+###ITS2 Cupressaceae
+ITSMETA <- as.data.frame(as.matrix(ITSphyloPLANTfilter@sam_data))
+ITSMETA1 <- ITSMETA %>% rownames_to_column("Tube.Code")
+
+ITSMETA1$Start_Date <- as.Date(ITSMETA1$Start_Date , format = "%Y-%m-%d")
+ITSMETA1$yearseason <- ifelse("2018-12-01" < ITSMETA1$Start_Date & ITSMETA1$Start_Date < "2019-02-28", "2018-19 Summer", ifelse("2019-12-01" < ITSMETA1$Start_Date & ITSMETA1$Start_Date < "2020-02-28", "2019-20 Summer", paste(ITSMETA1$year,ITSMETA1$season,sep=" ")))
+
+#make the taxonomy and asv table
+ITSTAX <- as.data.frame(ITSphyloPLANTfilter@tax_table) %>% rownames_to_column("X")
+ITSASV <- as.data.frame(ITSphyloPLANTfilter@otu_table) %>% rownames_to_column("X")
+
+ITSASVTAX <- left_join(ITSTAX,ITSASV,by="X")
+
+#Cupressaceae
+ITSASVTAXCup <- ITSASVTAX %>% filter(Family == "f__Cupressaceae")
+ITSASVTAXCup$Genus <- gsub(x = ITSASVTAXCup$Genus, pattern = "g__", replacement = "")
+ITSASVTAXCup$Family <- gsub(x = ITSASVTAXCup$Family, pattern = "f__", replacement = "")
+
+ITSASVTAXCup$taxid = paste(ITSASVTAXCup$Family,ITSASVTAXCup$Genus,sep="-")
+# CupTaxID <- ITSASVTAXCup %>% select(42,39:41)
+ITScuptax <- ITSASVTAXCup %>% select("taxid","Family","Genus") %>% unique()
+ITSASVTAXCup1 <- ITSASVTAXCup %>% select(38,9:37) %>% dplyr::group_by(taxid) %>% summarise_all(sum)
+
+#AtherotaxITSASVTAXCup1is has no entries so we can remove that row
+ITSASVTAXCup1long <- ITSASVTAXCup1 %>% melt()
+names(ITSASVTAXCup1long)[names(ITSASVTAXCup1long) == 'variable'] <- 'Tube.Code'
+ITSASVTAXCup1longMETA <- left_join(ITSASVTAXCup1long,ITSMETA1,by="Tube.Code")
+ITSASVTAXCup1longMETAtax <- left_join(ITSASVTAXCup1longMETA,ITScuptax,by="taxid")
+ITSASVTAXCup1longMETAtax$Genus[is.na(ITSASVTAXCup1longMETAtax$Genus)] <- "unclassified"
+#group together by season
+#I have to make a column that groups them better
+ITSCupSeasonag <- ITSASVTAXCup1longMETAtax %>% select("Genus", "value", "yearseason") 
+ITSCupSeasonag$GenusYearSeason = paste(ITSCupSeasonag$Genus,ITSCupSeasonag$yearseason,sep="-")
+ITSCupSeasonag2 <- ITSCupSeasonag %>% select("GenusYearSeason", "value") 
+ITSCupSeasonag3 <- ITSCupSeasonag2 %>% dplyr::group_by(GenusYearSeason) %>% summarise(count = sum(value))
+ITSCupSeasonag4 <- left_join(ITSCupSeasonag3,ITSCupSeasonag,by="GenusYearSeason") %>% select("Genus","yearseason","count") %>% unique()
+
+colnames(ITSCupSeasonag4) <- c("Genus", "yearseason", "count")
+
+#turn counts to relative abundances
+ITSCupSeasonag4RA <- ITSCupSeasonag4 %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+#make sure each genus is displayed by total abundance
+#ggplot displays them with the heaviest
+itscupgenusrank <- ITSCupSeasonag4RA %>% na.omit() %>% group_by(Genus) %>% mutate(RASum = sum(RelativeAbundance)) %>% select("Genus","RASum") %>% unique() %>% arrange(RASum)
+#because unclassified is more common now
+
+itscuprank <- c("unclassified", "Callitris",  "Callitropsis",  "Cupressus", "Juniperus")  
+
+
+dfsubset <- ITSCupSeasonag4RA %>% filter(yearseason == "2018-19 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2018-19 Summer", replacement = "2019-20 Summer")
+ITSCupSeasonag4RA1 <- rbind(ITSCupSeasonag4RA,dfsubset)
+
+
+
+
+ITSCupSeasonag4RA1$Genus = factor(ITSCupSeasonag4RA1$Genus , levels=itscuprank) 
+
+ITSCupSeasonag4RA1$yearseason = factor(ITSCupSeasonag4RA1$yearseason , levels=yearmonthCOMPL) 
+
+
+itscupheat <- ggplot(ITSCupSeasonag4RA1, aes(x=yearseason ,y=Genus, fill=RelativeAbundance)) +
+  geom_tile() + labs(fill = "Relative Abundance", x="Season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "firebrick3", limits=c(0,1), na.value="white") +
+  theme(axis.text.y = element_text(size=10, angle=45))
+itscupheat
+
+#calculate the N for each
+###I have to work our how many samples are in each season
+ITSASVTAXCup1longMETAtax
+
+#and remove all the things with zero as the count and remove repeats
+ITSNcalc <- ITSASVTAXCup1longMETAtax %>% select("Tube.Code", "Genus", "yearseason", "value") %>% filter(value > 0) %>% unique()
+
+unique(ITSNcalc$yearseason)
+seasonsvector <- c("2019 Winter", "2019 Spring", "2020 Autumn", "2020 Winter")   
+
+#This loop sets how many samples are in each year-season combination
+nrowdf = data.frame()
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvector))
+{
+  ys <- seasonsvector[i]
+  ITSNcalc2 <- ITSNcalc %>% filter(yearseason == ys) %>% select(Tube.Code) %>% unique %>% nrow()
+  print(ITSNcalc2)
+  a = rbind(ys,a)
+  b = rbind(ITSNcalc2,b)
+}
+nrowdf = cbind(a,b)
+ITScupnrowdf1 <- as.data.frame(nrowdf)
+
+###Myrtaceae Heatmaps----
+ITSASVTAXMyr <- ITSASVTAX %>% filter(Family == "f__Myrtaceae")
+ITSASVTAXMyr$Genus <- gsub(x = ITSASVTAXMyr$Genus, pattern = "g__", replacement = "")
+ITSASVTAXMyr$Family <- gsub(x = ITSASVTAXMyr$Family, pattern = "f__", replacement = "")
+
+ITSASVTAXMyr$taxid = paste(ITSASVTAXMyr$Family,ITSASVTAXMyr$Genus,sep="-")
+# CupTaxID <- ITSASVTAXCup %>% select(42,39:41)
+ITSmyrtax <- ITSASVTAXMyr %>% select("taxid","Family","Genus") %>% unique()
+ITSASVTAXMyr1 <- ITSASVTAXMyr %>% select(38,9:37) %>% dplyr::group_by(taxid) %>% summarise_all(sum)
+
+
+#AtherotaxITSASVTAXCup1is has no entries so we can remove that row
+ITSASVTAXMyr1long <- ITSASVTAXMyr1 %>% melt()
+names(ITSASVTAXMyr1long)[names(ITSASVTAXMyr1long) == 'variable'] <- 'Tube.Code'
+names(ITSplantmeta)[names(ITSplantmeta) == 'X'] <- 'Tube.Code'
+ITSASVTAXMyr1longMETA <- left_join(ITSASVTAXMyr1long,ITSMETA1,by="Tube.Code")
+ITSASVTAXMyr1longMETAtax <- left_join(ITSASVTAXMyr1longMETA,ITSmyrtax,by="taxid")
+ITSASVTAXMyr1longMETAtax$Genus[is.na(ITSASVTAXMyr1longMETAtax$Genus)] <- "unclassified"
+#group together by season
+#I have to make a column that groups them better
+ITSMyrSeasonag <- ITSASVTAXMyr1longMETAtax %>% select("Genus", "value", "yearseason") 
+ITSMyrSeasonag$GenusYearSeason = paste(ITSMyrSeasonag$Genus,ITSMyrSeasonag$yearseason,sep="-")
+ITSMyrSeasonag2 <- ITSMyrSeasonag %>% select("GenusYearSeason", "value") 
+ITSMyrSeasonag3 <- ITSMyrSeasonag2 %>% dplyr::group_by(GenusYearSeason) %>% summarise(count = sum(value))
+ITSMyrSeasonag4 <- left_join(ITSMyrSeasonag3,ITSMyrSeasonag,by="GenusYearSeason") %>% select("Genus","yearseason","count") %>% unique()
+
+colnames(ITSMyrSeasonag4) <- c("Genus", "yearseason", "count")
+
+
+#turn counts to relative abundances
+ITSMyrSeasonag4RA <- ITSMyrSeasonag4 %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+#make sure each genus is displayed by total abundance
+#ggplot displays them with the heaviest
+itsmyrgenusrank <- ITSMyrSeasonag4RA %>% na.omit() %>% group_by(Genus) %>% mutate(RASum = sum(RelativeAbundance)) %>% select("Genus","RASum") %>% unique() %>% arrange(RASum)
+#because unclassified is more common now
+
+itsmyrrank <- c("unclassified", "Melaleuca","Eucalyptus")
+
+dfsubset <- ITSMyrSeasonag4RA %>% filter(yearseason == "2018-19 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2018-19 Summer", replacement = "2019-20 Summer")
+ITSMyrSeasonag4RA1 <- rbind(ITSMyrSeasonag4RA,dfsubset)
+
+ITSMyrSeasonag4RA1$Genus = factor(ITSMyrSeasonag4RA1$Genus , levels=itsmyrrank) 
+
+ITSMyrSeasonag4RA1$yearseason = factor(ITSMyrSeasonag4RA1$yearseason , levels=yearmonthCOMPL) 
+
+
+itsmyrheat <- ggplot(ITSMyrSeasonag4RA1, aes(x=yearseason ,y=Genus, fill=RelativeAbundance)) +
+  geom_tile() + labs(fill = "Relative Abundance", x="Season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "firebrick3", limits=c(0,1), na.value="white") +
+  theme(axis.text.y = element_text(size=10, angle=45))
+itsmyrheat
+
+
+##calculate the N
+#and remove all the things with zero as the count and remove repeats
+ITSMNcalc <- ITSASVTAXMyr1longMETAtax %>% select("Tube.Code", "Genus", "yearseason", "value") %>% filter(value > 0) %>% unique()
+
+unique(ITSMNcalc$yearseason)
+seasonsvector <- c("2019 Winter", "2019 Spring", "2020 Winter", "2020 Spring")   
+
+#This loop sets how many samples are in each year-season combination
+nrowdf = data.frame()
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvector))
+{
+  ys <- seasonsvector[i]
+  ITSMNcalc2 <- ITSMNcalc %>% filter(yearseason == ys) %>% select(Tube.Code) %>% unique %>% nrow()
+  print(ITSMNcalc2)
+  a = rbind(ys,a)
+  b = rbind(ITSMNcalc2,b)
+}
+nrowdf = cbind(a,b)
+ITSmyrnrowdf1 <- as.data.frame(nrowdf)
+
+#add that to inkscape
+
+#trnL-trnF for Myrtaceae
+trnASVTAX <- left_join(trnTAX,trnASV,by="ASVID")
+trnASVTAXMyr <- trnASVTAX %>% filter(Family == "Myrtaceae")
+#note that there are no unclassified in here
+trnASVTAXMyr$taxid = paste(trnASVTAXMyr$Family,trnASVTAXMyr$Genus,sep="-")
+MyrTaxID <- trnASVTAXMyr %>% select("taxid","Family","Genus")
+trnASVTAXMyrID <- trnASVTAXMyr %>% select(42,9:41) %>% dplyr::group_by(`taxid`) %>% summarise_all(sum)
+#Atherotaxis has no entries so we can remove that row
+# trnASVTAXPCupID <- trnASVTAXPCupID %>% filter(!taxid == "Athrotaxis-NA")
+trnASVTAXMyrIDlong <- trnASVTAXMyrID %>% melt()
+names(trnASVTAXMyrIDlong)[names(trnASVTAXMyrIDlong) == 'variable'] <- 'Tube.Code'
+trnASVTAXMyrIDlongMETA <- left_join(trnASVTAXMyrIDlong,trnMETA,by="Tube.Code")
+trnASVTAXMyrIDlongMETAtax <- left_join(trnASVTAXMyrIDlongMETA,MyrTaxID,by="taxid")
+#group together by season
+#I have to make a column that groups them better
+
+trnMyrSeasonag <- trnASVTAXMyrIDlongMETAtax %>% select("Genus", "value", "yearseason") 
+trnMyrSeasonag$Genus[is.na(trnMyrSeasonag$Genus)] <- "unclassified"
+
+
+trnMyrSeasonag$GenusYearSeason = paste(trnMyrSeasonag$Genus,trnMyrSeasonag$yearseason,sep="-")
+trnMyrSeasonag2 <- trnMyrSeasonag %>% select("GenusYearSeason", "value") 
+trnMyrSeasonag3 <- trnMyrSeasonag2 %>% dplyr::group_by(GenusYearSeason) %>% summarise(count = sum(value))
+trnMyrSeasonag4 <- left_join(trnMyrSeasonag3,trnMyrSeasonag,by="GenusYearSeason") %>% select("Genus","yearseason","count") %>% unique()
+
+#try to turn these into relative abundances
+trnMyrSeasonagRA <- trnMyrSeasonag4 %>% group_by(yearseason) %>% mutate(RelativeAbundance = count/sum(count))
+
+#make sure each genus is displayed by total abundance
+#ggplot displays them with the heaviest
+myrgenusrank <- trnMyrSeasonagRA %>% na.omit() %>% group_by(Genus) %>% mutate(RASum = sum(RelativeAbundance)) %>% select("Genus","RASum") %>% unique() %>% arrange(RASum)
+#I will remove backhousia, metrosideros, melaleuca, arilastrum and kunzea because they have less than %1 abundance cumulative
+#but backhousia is not present at all
+trnMyrSeasonagRA1 <- trnMyrSeasonagRA %>% filter(!Genus %in% c("Backhousia","Metrosideros","Kunzea" ,"Arillastrum","Melaleuca"))
+
+myrrank <-  c("unclassified",     "Syzygium",     "Callistemon",  "Eucalyptus") 
+
+dfsubset <- trnMyrSeasonagRA1 %>% filter(yearseason == "2019-20 Summer")
+dfsubset$yearseason <- gsub(x=dfsubset$yearseason, pattern = "2019-20 Summer", replacement = "2018-19 Summer")
+dfsubset$RelativeAbundance[dfsubset$RelativeAbundance<20] <- 0
+trnMyrSeasonagRA2 <- rbind(trnMyrSeasonagRA1,dfsubset)
+
+
+trnMyrSeasonagRA2$Genus = factor(trnMyrSeasonagRA2$Genus , levels=myrrank) 
+
+trnMyrSeasonagRA2$yearseason = factor(trnMyrSeasonagRA2$yearseason , levels=yearmonthCOMPL) 
+
+trnmyrheat <- ggplot(trnMyrSeasonagRA2, aes(x=yearseason, ,y=Genus, fill=RelativeAbundance)) +
+  geom_tile() + labs(fill = "Relative Abundance", x="Season") + scale_x_discrete(position="top") +
+  scale_fill_gradient(low = "white", high = "dodgerblue3", limits=c(0,1), na.value="white") +
+  theme(axis.text.y = element_text(size=10, angle=45))
+trnmyrheat
+
+
+#calculate N
+trnMNcalc <- trnASVTAXMyrIDlongMETAtax %>% select("Tube.Code", "Genus", "yearseason", "value") %>% filter(value > 0) %>% unique()
+
+unique(trnMNcalc$yearseason)
+seasonsvector <- c("2019 Autumn",    "2019 Winter",    "2019 Spring",    "2019-20 Summer", "2020 Autumn",    "2020 Winter",    "2020 Spring")   
+
+#This loop sets how many samples are in each year-season combination
+nrowdf = data.frame()
+a = vector()
+b = vector()
+for (i in 1:length(seasonsvector))
+{
+  ys <- seasonsvector[i]
+  trnMNcalc2 <- trnMNcalc %>% filter(yearseason == ys) %>% select(Tube.Code) %>% unique %>% nrow()
+  print(trnMNcalc2)
+  a = rbind(ys,a)
+  b = rbind(trnMNcalc2,b)
+}
+nrowdf = cbind(a,b)
+trnmyrnrowdf1 <- as.data.frame(nrowdf)
+
+
